@@ -1,22 +1,56 @@
-import { useState } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { Link } from "react-router";
-import type { Route } from "./+types/home";
+import type { Route } from "./+types/dashboard";
 
 // ============================================================
 // TYPES
 // ============================================================
 
+type Role = "charity" | "company";
+type Page =
+  | "dashboard"
+  | "new_project"
+  | "register"
+  | "browse"
+  | "review";
+type ProjectStatusValue =
+  | "planning"
+  | "ready_to_start"
+  | "in_progress"
+  | "on_hold"
+  | "next_iteration";
+type ProjectLifecycle = "open" | "matched";
+type VolunteeringType =
+  | "in_person"
+  | "remote"
+  | "hybrid"
+  | "event_based"
+  | "skills_based"
+  | "mentoring";
+
+interface SkillOverlap {
+  matched: string[];
+  count: number;
+  total: number;
+}
+
 interface Project {
   id: string;
+  charityId: string;
   title: string;
   description: string;
-  status: string;
+  status: ProjectStatusValue;
   essentialSkills: string[];
   startDate: string;
   endDate: string;
   peopleNeeded: number;
-  volunteeringType: string;
+  volunteeringType: VolunteeringType | "";
   additionalInfo: string;
+  projectStatus: ProjectLifecycle;
+}
+
+interface ProjectWithOverlap extends Project {
+  overlap: SkillOverlap;
 }
 
 interface Company {
@@ -24,67 +58,102 @@ interface Company {
   name: string;
   bio: string;
   offeredSkills: string[];
-  status: "available" | "unavailable";
+  status: "available" | "engaged" | "inactive";
   preferredProjectIds: string[];
 }
 
-interface MatchResult {
-  companyId: string;
-  companyName: string;
-  overall: number;
-  matchedSkills: string[];
-  missingSkills: string[];
+interface ResponseFormData {
+  meetingDate: string;
+  meetingTime: string;
+  meetingNote: string;
+  peopleAvailable: number;
+  availableFrom: string;
+  availableUntil: string;
+  description: string;
 }
 
-interface MatchNotification {
+interface CompanyResponse extends ResponseFormData {
   companyId: string;
+  projectId: string;
+  submittedAt: string;
+}
+
+interface RankedResponse extends CompanyResponse {
   companyName: string;
+  companyBio: string;
+  overlap: SkillOverlap;
+}
+
+interface Notification {
+  companyId: string;
   projectTitle: string;
+}
+
+interface ProjectFormState {
+  title: string;
+  description: string;
+  status: ProjectStatusValue;
+  essentialSkills: string[];
+  startDate: string;
+  endDate: string;
+  peopleNeeded: number;
+  volunteeringType: VolunteeringType | "";
+  additionalInfo: string;
+}
+
+interface CompanyFormState {
+  name: string;
+  bio: string;
+  offeredSkills: string[];
+}
+
+interface RespondingTo {
+  projectId: string;
+  companyId: string;
 }
 
 // ============================================================
 // MATCHING ENGINE
 // ============================================================
 
-function computeSkillsScore(
-  essential: string[],
-  offered: string[],
-): { score: number; matched: string[]; missing: string[] } {
-  const ess = new Set(essential);
-  const off = new Set(offered);
-  const matched = [...ess].filter((s) => off.has(s));
-  const missing = [...ess].filter((s) => !off.has(s));
-  const union = new Set([...ess, ...off]);
-  const score = union.size === 0 ? 0 : matched.length / union.size;
-  return { score, matched, missing };
+function getSkillOverlap(
+  projectSkills: string[],
+  companySkills: string[],
+): SkillOverlap {
+  const proj = new Set(projectSkills.map((s) => s.toLowerCase()));
+  const comp = new Set(companySkills.map((s) => s.toLowerCase()));
+  const matched = [...proj].filter((s) => comp.has(s));
+  return { matched, count: matched.length, total: proj.size };
 }
 
-function runMatching(
+function getMatchedProjects(
+  projects: Project[],
+  company: Company,
+): ProjectWithOverlap[] {
+  return projects
+    .filter((p) => p.projectStatus === "open")
+    .map((p) => ({ ...p, overlap: getSkillOverlap(p.essentialSkills, company.offeredSkills) }))
+    .filter((p) => p.overlap.count > 0)
+    .sort((a, b) => b.overlap.count - a.overlap.count);
+}
+
+function rankResponses(
   project: Project,
+  responses: CompanyResponse[],
   companies: Company[],
-  topN = 5,
-): MatchResult[] {
-  return companies
-    .filter(
-      (c) =>
-        c.status === "available" &&
-        c.preferredProjectIds.includes(project.id),
-    )
-    .map((c) => {
-      const { score, matched, missing } = computeSkillsScore(
-        project.essentialSkills,
-        c.offeredSkills,
-      );
+): RankedResponse[] {
+  return responses
+    .filter((r) => r.projectId === project.id)
+    .map((r) => {
+      const comp = companies.find((c) => c.id === r.companyId);
       return {
-        companyId: c.id,
-        companyName: c.name,
-        overall: score,
-        matchedSkills: matched,
-        missingSkills: missing,
+        ...r,
+        companyName: comp?.name ?? "Unknown",
+        companyBio: comp?.bio ?? "",
+        overlap: getSkillOverlap(project.essentialSkills, comp?.offeredSkills ?? []),
       };
     })
-    .sort((a, b) => b.overall - a.overall)
-    .slice(0, topN);
+    .sort((a, b) => b.overlap.count - a.overlap.count);
 }
 
 // ============================================================
@@ -92,79 +161,45 @@ function runMatching(
 // ============================================================
 
 const SKILLS: string[] = [
-  "Web Development",
-  "Mobile Development",
-  "UI/UX Design",
-  "Data Analysis",
-  "Database Management",
-  "Project Management",
-  "Graphic Design",
-  "Copywriting",
-  "SEO",
-  "Marketing",
-  "Legal Advice",
-  "Accounting",
-  "Fundraising",
-  "Event Planning",
-  "Photography",
-  "Video Production",
-  "Social Media",
-  "DevOps",
-  "Cybersecurity",
-  "Training & Mentoring",
-  "Interview Prep",
-  "Presentations",
-  "Upskill",
+  "Web Development", "Mobile Development", "UI/UX Design", "Data Analysis",
+  "Database Management", "Project Management", "Graphic Design", "Copywriting",
+  "SEO", "Marketing", "Legal Advice", "Accounting", "Fundraising",
+  "Event Planning", "Photography", "Video Production", "Social Media",
+  "DevOps", "Cybersecurity", "Training & Mentoring",
+  "Interview Prep", "Presentations", "Upskill",
 ];
 
-const STATUSES = [
-  { v: "planning", l: "Planning", tw: "bg-purple-100 text-purple-700" },
-  {
-    v: "ready_to_start",
-    l: "Ready to Start",
-    tw: "bg-blue-100 text-blue-700",
-  },
-  {
-    v: "in_progress",
-    l: "In Progress",
-    tw: "bg-yellow-100 text-yellow-700",
-  },
-  { v: "on_hold", l: "On Hold", tw: "bg-orange-100 text-orange-700" },
-  {
-    v: "next_iteration",
-    l: "Next Iteration",
-    tw: "bg-cyan-100 text-cyan-700",
-  },
+const STATUSES: { v: ProjectStatusValue; l: string; tw: string; dot: string }[] = [
+  { v: "planning",       l: "Planning",        tw: "bg-purple-50 text-purple-700 border-purple-300", dot: "bg-purple-500" },
+  { v: "ready_to_start", l: "Ready to Start",  tw: "bg-blue-50 text-blue-700 border-blue-300",       dot: "bg-blue-500"   },
+  { v: "in_progress",    l: "In Progress",     tw: "bg-yellow-50 text-yellow-700 border-yellow-300", dot: "bg-yellow-500" },
+  { v: "on_hold",        l: "On Hold",         tw: "bg-orange-50 text-orange-700 border-orange-300", dot: "bg-orange-500" },
+  { v: "next_iteration", l: "Next Iteration",  tw: "bg-cyan-50 text-cyan-700 border-cyan-300",       dot: "bg-cyan-500"   },
 ];
 
-const VOL_TYPES = [
-  { v: "in_person", l: "In-Person", d: "On-site at charity location" },
-  { v: "remote", l: "Remote", d: "Work from anywhere online" },
-  { v: "hybrid", l: "Hybrid", d: "Mix of in-person and remote" },
-  { v: "event_based", l: "Event-Based", d: "Specific events or one-off days" },
-  {
-    v: "skills_based",
-    l: "Skills-Based",
-    d: "Pro-bono professional services",
-  },
-  { v: "mentoring", l: "Mentoring", d: "Ongoing mentorship or coaching" },
+const VOL_TYPES: { v: VolunteeringType; l: string; d: string }[] = [
+  { v: "in_person",   l: "In-Person",    d: "On-site at charity location" },
+  { v: "remote",      l: "Remote",       d: "Work from anywhere online" },
+  { v: "hybrid",      l: "Hybrid",       d: "Mix of in-person and remote" },
+  { v: "event_based", l: "Event-Based",  d: "Specific events or one-off days" },
+  { v: "skills_based",l: "Skills-Based", d: "Pro-bono professional services" },
+  { v: "mentoring",   l: "Mentoring",    d: "Ongoing mentorship or coaching" },
 ];
 
 const CHAR_LIMIT = 500;
 const MIN_SKILLS = 3;
 let _uid = 0;
-const uid = () => `${++_uid}_${Date.now()}`;
+const uid = (p: string) => `${p}_${++_uid}_${Date.now()}`;
+const toKey = (s: string) =>
+  s.toLowerCase().replace(/ /g, "_").replace(/\//g, "_");
+const toLabel = (k: string) => k.replace(/_/g, " ");
 
 // ============================================================
 // SHARED COMPONENTS
 // ============================================================
 
 function SkillPicker({
-  selected,
-  onChange,
-  label,
-  sub,
-  minRequired,
+  selected, onChange, label, sub, minRequired,
 }: {
   selected: string[];
   onChange: (s: string[]) => void;
@@ -174,28 +209,25 @@ function SkillPicker({
 }) {
   return (
     <div>
-      <label className="block text-sm font-semibold text-gray-700 mb-1">
+      <label className="block text-sm font-bold text-gray-700 tracking-wide mb-1">
         {label}
       </label>
-      {sub && <p className="text-xs text-gray-500 mb-2">{sub}</p>}
-      <div className="flex flex-wrap gap-2 mt-2">
+      {sub && <p className="text-xs text-gray-400 mb-2">{sub}</p>}
+      <div className="flex flex-wrap gap-1.5 mt-2">
         {SKILLS.map((skill) => {
-          const on = selected.includes(skill);
+          const k = toKey(skill);
+          const on = selected.includes(k);
           return (
             <button
               key={skill}
               type="button"
               onClick={() =>
-                onChange(
-                  on
-                    ? selected.filter((s) => s !== skill)
-                    : [...selected, skill],
-                )
+                onChange(on ? selected.filter((s) => s !== k) : [...selected, k])
               }
               className={`px-3 py-1 rounded-full text-xs border transition-all duration-150 ${
                 on
-                  ? "bg-emerald-600 border-emerald-600 text-white font-bold"
-                  : "bg-white border-gray-200 text-gray-600 hover:border-emerald-400 hover:text-emerald-600"
+                  ? "bg-gray-900 border-gray-900 text-white font-bold"
+                  : "bg-white border-gray-300 text-gray-500 hover:border-gray-400"
               }`}
             >
               {skill}
@@ -215,54 +247,277 @@ function SkillPicker({
   );
 }
 
-function ScoreBar({ value }: { value: number }) {
-  const pct = Math.round(value * 100);
-  const color =
-    pct >= 70 ? "#059669" : pct >= 40 ? "#ca8a04" : "#dc2626";
+function SkillTag({
+  skill,
+  highlight = false,
+}: {
+  skill: string;
+  highlight?: boolean;
+}) {
   return (
-    <div className="flex items-center gap-3 w-full">
-      <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-500"
-          style={{ width: `${pct}%`, background: color }}
-        />
-      </div>
-      <span
-        className="text-xs font-bold tabular-nums w-9 text-right"
-        style={{ color }}
-      >
-        {pct}%
-      </span>
-    </div>
+    <span
+      className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+        highlight
+          ? "bg-emerald-100 text-emerald-800"
+          : "bg-slate-100 text-slate-600"
+      }`}
+    >
+      {toLabel(skill)}
+    </span>
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status }: { status: ProjectStatusValue }) {
   const s = STATUSES.find((x) => x.v === status) ?? STATUSES[0];
   return (
     <span
-      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${s.tw}`}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${s.tw}`}
     >
+      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
       {s.l}
     </span>
   );
 }
 
+function LifecycleBadge({ status }: { status: ProjectLifecycle }) {
+  return (
+    <span
+      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+        status === "matched"
+          ? "bg-emerald-100 text-emerald-700"
+          : "bg-blue-100 text-blue-700"
+      }`}
+    >
+      {status}
+    </span>
+  );
+}
+
+function StatCard({
+  label, value, color,
+}: {
+  label: string;
+  value: number;
+  color: string;
+}) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 text-center flex-1 min-w-[80px]">
+      <div className="text-2xl font-bold tabular-nums" style={{ color }}>
+        {value}
+      </div>
+      <div className="text-[11px] text-gray-400 font-semibold mt-0.5">
+        {label}
+      </div>
+    </div>
+  );
+}
+
 // ============================================================
-// EMPTY FORM
+// RESPONSE FORM
 // ============================================================
 
-const emptyProjectForm = (): Omit<Project, "id"> => ({
-  title: "",
-  description: "",
-  status: "planning",
-  essentialSkills: [],
-  startDate: "",
-  endDate: "",
-  peopleNeeded: 1,
-  volunteeringType: "remote",
-  additionalInfo: "",
-});
+function ProjectResponseForm({
+  project,
+  company,
+  onSubmit,
+  onCancel,
+}: {
+  project: Project;
+  company: Company;
+  onSubmit: (r: CompanyResponse) => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<ResponseFormData>({
+    meetingDate: "", meetingTime: "", meetingNote: "",
+    peopleAvailable: 1, availableFrom: "", availableUntil: "",
+    description: "",
+  });
+
+  const vol = VOL_TYPES.find((v) => v.v === project.volunteeringType);
+  const overlap = getSkillOverlap(project.essentialSkills, company.offeredSkills);
+  const isValid =
+    !!(form.meetingDate && form.meetingTime && form.peopleAvailable >= 1
+      && form.availableFrom && form.availableUntil && form.description.trim());
+
+  return (
+    <div className="bg-white rounded-2xl border-2 border-emerald-200 shadow-sm p-8">
+      {/* Header */}
+      <div className="flex justify-between items-start mb-6 pb-6 border-b border-gray-100">
+        <div>
+          <p className="text-[11px] font-bold text-emerald-600 uppercase tracking-widest mb-1.5">
+            Responding as {company.name}
+          </p>
+          <h2 className="text-xl font-bold text-gray-900">{project.title}</h2>
+        </div>
+        <button
+          onClick={onCancel}
+          className="text-gray-400 hover:text-gray-600 text-xl px-2 transition-colors"
+        >
+          ×
+        </button>
+      </div>
+
+      <p className="text-sm text-gray-500 leading-relaxed mb-4">
+        {project.description}
+      </p>
+
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {project.essentialSkills.map((s) => (
+          <SkillTag
+            key={s}
+            skill={s}
+            highlight={overlap.matched.includes(s.toLowerCase())}
+          />
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-4 text-xs text-gray-400 font-semibold mb-2">
+        <span>{project.startDate} → {project.endDate}</span>
+        <span>{project.peopleNeeded} volunteer{project.peopleNeeded !== 1 ? "s" : ""}</span>
+        {vol && <span>{vol.l}</span>}
+      </div>
+      <p className="text-xs font-semibold text-emerald-600 mb-8">
+        {overlap.count} of {overlap.total} skills matched
+      </p>
+
+      <div className="space-y-6">
+        {/* Meeting request */}
+        <div className="bg-gradient-to-br from-emerald-50 to-cyan-50 border border-emerald-200 rounded-xl p-5">
+          <label className="block text-sm font-bold text-emerald-800 mb-1">
+            Request a Meeting
+          </label>
+          <p className="text-xs text-emerald-700/70 mb-4">
+            Propose an initial meeting to discuss the project with the charity
+          </p>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <p className="text-xs font-semibold text-gray-600 mb-1">
+                Preferred Date
+              </p>
+              <input
+                type="date"
+                value={form.meetingDate}
+                onChange={(e) => setForm({ ...form, meetingDate: e.target.value })}
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white"
+              />
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-600 mb-1">
+                Preferred Time
+              </p>
+              <input
+                type="time"
+                value={form.meetingTime}
+                onChange={(e) => setForm({ ...form, meetingTime: e.target.value })}
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white"
+              />
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-gray-600 mb-1">
+              Meeting Note{" "}
+              <span className="font-normal text-gray-400">(optional)</span>
+            </p>
+            <input
+              type="text"
+              value={form.meetingNote}
+              onChange={(e) => setForm({ ...form, meetingNote: e.target.value })}
+              placeholder="e.g. Happy to do a video call or meet at your offices"
+              className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white"
+            />
+          </div>
+        </div>
+
+        {/* Availability */}
+        <div>
+          <label className="block text-sm font-bold text-gray-700 mb-1">
+            Your Availability
+          </label>
+          <div className="grid grid-cols-3 gap-3 mt-2">
+            <div>
+              <p className="text-xs font-semibold text-gray-500 mb-1">
+                People Available
+              </p>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={form.peopleAvailable}
+                onChange={(e) =>
+                  setForm({ ...form, peopleAvailable: Math.max(1, parseInt(e.target.value) || 1) })
+                }
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-500 mb-1">
+                Available From
+              </p>
+              <input
+                type="date"
+                value={form.availableFrom}
+                onChange={(e) => setForm({ ...form, availableFrom: e.target.value })}
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-500 mb-1">
+                Available Until
+              </p>
+              <input
+                type="date"
+                value={form.availableUntil}
+                onChange={(e) => setForm({ ...form, availableUntil: e.target.value })}
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Offer description */}
+        <div>
+          <label className="block text-sm font-bold text-gray-700 mb-1">
+            What We Can Offer
+          </label>
+          <p className="text-xs text-gray-400 mb-2">
+            Describe how your team can support this project
+          </p>
+          <textarea
+            value={form.description}
+            onChange={(e) => setForm({ ...form, description: e.target.value })}
+            rows={4}
+            placeholder="e.g. Our team of 5 developers can build the website using React and Node.js..."
+            className="w-full px-3 py-2.5 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-y"
+          />
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={() => {
+              if (isValid)
+                onSubmit({
+                  ...form,
+                  companyId: company.id,
+                  projectId: project.id,
+                  submittedAt: new Date().toISOString(),
+                });
+            }}
+            disabled={!isValid}
+            className="flex-1 py-3 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-bold shadow-sm transition-colors"
+          >
+            Submit Response &amp; Request Meeting
+          </button>
+          <button
+            onClick={onCancel}
+            className="py-3 px-6 rounded-xl border border-gray-200 bg-white text-gray-500 text-sm font-semibold hover:bg-gray-50 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ============================================================
 // META
@@ -273,100 +528,118 @@ export function meta({}: Route.MetaArgs) {
 }
 
 // ============================================================
+// EMPTY FORMS
+// ============================================================
+
+const emptyProj = (): ProjectFormState => ({
+  title: "", description: "", status: "planning",
+  essentialSkills: [], startDate: "", endDate: "",
+  peopleNeeded: 1, volunteeringType: "", additionalInfo: "",
+});
+
+const emptyComp = (): CompanyFormState => ({
+  name: "", bio: "", offeredSkills: [],
+});
+
+// ============================================================
 // MAIN COMPONENT
 // ============================================================
 
 export default function Dashboard() {
-  const [role, setRole] = useState<"charity" | "company" | null>(null);
-  const [tab, setTab] = useState("projects");
+  const [role, setRole] = useState<Role | null>(null);
+  const [page, setPage] = useState<Page>("dashboard");
 
-  // Charity state
   const [projects, setProjects] = useState<Project[]>([]);
-  const [showProjectForm, setShowProjectForm] = useState(false);
-  const [projectForm, setProjectForm] = useState(emptyProjectForm());
-  const [matchResults, setMatchResults] = useState<
-    Record<string, MatchResult[]>
-  >({});
-  const [selectedMatches, setSelectedMatches] = useState<
-    Record<string, string>
-  >({});
-
-  // Company state
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [myCompany, setMyCompany] = useState<Company | null>(null);
-  const [companyForm, setCompanyForm] = useState({
-    name: "",
-    bio: "",
-    offeredSkills: [] as string[],
-  });
-  const [notifications, setNotifications] = useState<MatchNotification[]>([]);
+  const [responses, setResponses] = useState<CompanyResponse[]>([]);
+  const [selectedMatches, setSelectedMatches] = useState<Record<string, string>>({});
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [respondingTo, setRespondingTo] = useState<RespondingTo | null>(null);
 
-  // ---- charity handlers ----
+  const [projForm, setProjForm] = useState<ProjectFormState>(emptyProj());
+  const [compForm, setCompForm] = useState<CompanyFormState>(emptyComp());
 
-  function addProject() {
-    if (
-      !projectForm.title.trim() ||
-      projectForm.essentialSkills.length < MIN_SKILLS
-    )
-      return;
-    setProjects((prev) => [...prev, { id: uid(), ...projectForm }]);
-    setProjectForm(emptyProjectForm());
-    setShowProjectForm(false);
-  }
+  const projValid =
+    !!(projForm.title.trim() && projForm.description.trim()
+      && projForm.essentialSkills.length >= MIN_SKILLS
+      && projForm.startDate && projForm.endDate && projForm.volunteeringType);
 
-  function findMatches(project: Project) {
-    const results = runMatching(project, companies);
-    setMatchResults((prev) => ({ ...prev, [project.id]: results }));
-    setTab("matches");
-  }
+  const createProject = useCallback(() => {
+    if (!projValid) return;
+    const proj: Project = {
+      id: uid("proj"),
+      charityId: "charity_user",
+      ...projForm,
+      volunteeringType: projForm.volunteeringType as VolunteeringType,
+      projectStatus: "open",
+    };
+    setProjects((p) => [proj, ...p]);
+    setProjForm(emptyProj());
+    setPage("dashboard");
+  }, [projForm, projValid]);
 
-  function selectMatch(projectId: string, companyId: string) {
-    const project = projects.find((p) => p.id === projectId);
-    const company = companies.find((c) => c.id === companyId);
-    if (!project || !company) return;
-    setSelectedMatches((prev) => ({ ...prev, [projectId]: companyId }));
-    setNotifications((prev) => [
-      ...prev,
-      {
-        companyId,
-        companyName: company.name,
-        projectTitle: project.title,
-      },
-    ]);
-  }
-
-  // ---- company handlers ----
-
-  function registerCompany() {
-    if (
-      !companyForm.name.trim() ||
-      companyForm.offeredSkills.length < MIN_SKILLS
-    )
-      return;
-    const c: Company = {
-      id: uid(),
-      name: companyForm.name.trim(),
-      bio: companyForm.bio.trim(),
-      offeredSkills: companyForm.offeredSkills,
+  const createCompany = useCallback(() => {
+    if (!compForm.name.trim() || compForm.offeredSkills.length === 0) return;
+    const comp: Company = {
+      id: uid("comp"),
+      ...compForm,
       status: "available",
       preferredProjectIds: [],
     };
-    setCompanies((prev) => [...prev, c]);
-    setMyCompany(c);
-    setTab("browse");
+    setCompanies((p) => [...p, comp]);
+    setCompForm(emptyComp());
+    setPage("dashboard");
+  }, [compForm]);
+
+  const submitResponse = useCallback((response: CompanyResponse) => {
+    setResponses((p) => [...p, response]);
+    setCompanies((p) =>
+      p.map((c) =>
+        c.id === response.companyId
+          ? { ...c, preferredProjectIds: [...new Set([...c.preferredProjectIds, response.projectId])] }
+          : c,
+      ),
+    );
+    setRespondingTo(null);
+  }, []);
+
+  const selectMatch = useCallback(
+    (projId: string, compId: string) => {
+      setSelectedMatches((p) => ({ ...p, [projId]: compId }));
+      const proj = projects.find((p) => p.id === projId);
+      setNotifications((p) => [
+        ...p,
+        { companyId: compId, projectTitle: proj?.title ?? "" },
+      ]);
+      setProjects((p) =>
+        p.map((pr) =>
+          pr.id === projId ? { ...pr, projectStatus: "matched" } : pr,
+        ),
+      );
+    },
+    [projects],
+  );
+
+  const compNotifs = useMemo<Record<string, string[]>>(() => {
+    const m: Record<string, string[]> = {};
+    notifications.forEach((n) => {
+      if (!m[n.companyId]) m[n.companyId] = [];
+      m[n.companyId].push(n.projectTitle);
+    });
+    return m;
+  }, [notifications]);
+
+  const openProjects = projects.filter((p) => p.projectStatus === "open");
+
+  function navigate(p: Page) {
+    setPage(p);
+    setRespondingTo(null);
   }
 
-  function toggleInterest(projectId: string) {
-    if (!myCompany) return;
-    const already = myCompany.preferredProjectIds.includes(projectId);
-    const updated: Company = {
-      ...myCompany,
-      preferredProjectIds: already
-        ? myCompany.preferredProjectIds.filter((id) => id !== projectId)
-        : [...myCompany.preferredProjectIds, projectId],
-    };
-    setMyCompany(updated);
-    setCompanies((prev) => prev.map((c) => (c.id === myCompany.id ? updated : c)));
+  function switchRole() {
+    setRole(null);
+    setPage("dashboard");
+    setRespondingTo(null);
   }
 
   // ============================================================
@@ -375,911 +648,251 @@ export default function Dashboard() {
 
   if (!role) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-100 flex flex-col items-center justify-center px-4 py-16">
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-gray-50 to-slate-100 flex flex-col items-center justify-center px-4 py-16">
         <Link
           to="/"
-          className="mb-10 flex items-center gap-1 text-sm text-gray-500 hover:text-emerald-600 transition-colors"
+          className="mb-12 flex items-center gap-1 text-sm text-gray-400 hover:text-gray-600 transition-colors"
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="w-4 h-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M15 19l-7-7 7-7"
-            />
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
           </svg>
           Back to Home
         </Link>
 
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-emerald-500 mb-4 shadow-lg">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-7 h-7 text-white"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
-              />
-            </svg>
-          </div>
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">
-            Welcome to the Platform
+        <div className="text-center max-w-lg mb-10">
+          <p className="text-[11px] font-bold tracking-widest text-gray-400 uppercase mb-4">
+            CSI Matching Platform
+          </p>
+          <h1 className="text-4xl font-bold text-gray-900 mb-3 leading-tight">
+            Connect. Match. Impact.
           </h1>
-          <p className="text-gray-500">Select your role to get started</p>
+          <p className="text-gray-500 text-sm leading-relaxed">
+            Bridging charities and companies for meaningful social investment
+            partnerships.
+          </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
-          <button
-            onClick={() => { setRole("charity"); setTab("projects"); }}
-            className="bg-white rounded-2xl shadow-lg p-8 flex flex-col items-center text-center border border-emerald-100 hover:shadow-xl hover:border-emerald-300 transition-all duration-200 cursor-pointer"
-          >
-            <div className="w-14 h-14 rounded-full bg-emerald-100 flex items-center justify-center mb-4">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="w-7 h-7 text-emerald-600"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"
-                />
-              </svg>
-            </div>
-            <h2 className="text-xl font-semibold text-gray-800 mb-2">
-              I&apos;m a Charity
-            </h2>
-            <p className="text-sm text-gray-500">
-              Post volunteering projects and find the perfect company match
-            </p>
-          </button>
-
-          <button
-            onClick={() => { setRole("company"); setTab("browse"); }}
-            className="bg-white rounded-2xl shadow-lg p-8 flex flex-col items-center text-center border border-teal-100 hover:shadow-xl hover:border-teal-300 transition-all duration-200 cursor-pointer"
-          >
-            <div className="w-14 h-14 rounded-full bg-teal-100 flex items-center justify-center mb-4">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="w-7 h-7 text-teal-600"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                />
-              </svg>
-            </div>
-            <h2 className="text-xl font-semibold text-gray-800 mb-2">
-              I&apos;m a Company
-            </h2>
-            <p className="text-sm text-gray-500">
-              Browse charity projects and offer your team&apos;s CSRF days
-            </p>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ============================================================
-  // CHARITY DASHBOARD
-  // ============================================================
-
-  if (role === "charity") {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        {/* Header */}
-        <header className="bg-white border-b border-gray-100 sticky top-0 z-10">
-          <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="w-4 h-4 text-white"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
-                  />
-                </svg>
-              </div>
-              <span className="font-bold text-gray-800 text-sm">
-                Connect 4 Good
-              </span>
-              <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">
-                Charity
-              </span>
-            </div>
-            <button
-              onClick={() => setRole(null)}
-              className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
-            >
-              Switch role
-            </button>
-          </div>
-
-          {/* Tabs */}
-          <div className="max-w-5xl mx-auto px-4 flex">
-            {[
-              { id: "projects", label: "Projects", count: projects.length },
+        <div className="flex flex-col sm:flex-row gap-4 w-full max-w-xl">
+          {(
+            [
               {
-                id: "matches",
-                label: "Matches",
-                count: Object.keys(matchResults).length,
+                r: "charity" as Role,
+                title: "I'm a Charity",
+                desc: "Create project proposals and find company partners",
+                accent: "border-slate-900 hover:bg-slate-900 hover:text-white",
+                titleColor: "text-slate-900",
               },
-            ].map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-                  tab === t.id
-                    ? "border-emerald-500 text-emerald-600"
-                    : "border-transparent text-gray-500 hover:text-gray-700"
-                }`}
-              >
-                {t.label}
-                {t.count > 0 && (
-                  <span className="ml-1.5 bg-emerald-100 text-emerald-600 text-xs px-1.5 py-0.5 rounded-full">
-                    {t.count}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        </header>
-
-        <main className="max-w-5xl mx-auto px-4 py-8">
-          {/* ── PROJECTS TAB ── */}
-          {tab === "projects" && (
-            <div>
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-lg font-semibold text-gray-800">
-                  Your Projects
-                </h2>
-                <button
-                  onClick={() => setShowProjectForm((v) => !v)}
-                  className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="w-4 h-4"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M12 4v16m8-8H4"
-                    />
-                  </svg>
-                  New Project
-                </button>
-              </div>
-
-              {/* Create project form */}
-              {showProjectForm && (
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-6">
-                  <h3 className="text-base font-semibold text-gray-800 mb-5">
-                    Create a New Project
-                  </h3>
-                  <div className="space-y-5">
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1">
-                        Project Title{" "}
-                        <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={projectForm.title}
-                        onChange={(e) =>
-                          setProjectForm((f) => ({
-                            ...f,
-                            title: e.target.value,
-                          }))
-                        }
-                        placeholder="e.g. Rebuild our donation portal"
-                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1">
-                        Description
-                      </label>
-                      <textarea
-                        value={projectForm.description}
-                        onChange={(e) => {
-                          if (e.target.value.length <= CHAR_LIMIT)
-                            setProjectForm((f) => ({
-                              ...f,
-                              description: e.target.value,
-                            }));
-                        }}
-                        rows={3}
-                        placeholder="What does this project involve?"
-                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
-                      />
-                      <p className="text-right text-xs text-gray-400 mt-1">
-                        {projectForm.description.length}/{CHAR_LIMIT}
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">
-                          Status
-                        </label>
-                        <select
-                          value={projectForm.status}
-                          onChange={(e) =>
-                            setProjectForm((f) => ({
-                              ...f,
-                              status: e.target.value,
-                            }))
-                          }
-                          className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                        >
-                          {STATUSES.map((s) => (
-                            <option key={s.v} value={s.v}>
-                              {s.l}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">
-                          Volunteering Type
-                        </label>
-                        <select
-                          value={projectForm.volunteeringType}
-                          onChange={(e) =>
-                            setProjectForm((f) => ({
-                              ...f,
-                              volunteeringType: e.target.value,
-                            }))
-                          }
-                          className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                        >
-                          {VOL_TYPES.map((t) => (
-                            <option key={t.v} value={t.v}>
-                              {t.l} — {t.d}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">
-                          Start Date
-                        </label>
-                        <input
-                          type="date"
-                          value={projectForm.startDate}
-                          onChange={(e) =>
-                            setProjectForm((f) => ({
-                              ...f,
-                              startDate: e.target.value,
-                            }))
-                          }
-                          className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">
-                          End Date
-                        </label>
-                        <input
-                          type="date"
-                          value={projectForm.endDate}
-                          onChange={(e) =>
-                            setProjectForm((f) => ({
-                              ...f,
-                              endDate: e.target.value,
-                            }))
-                          }
-                          className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-700 mb-1">
-                          People Needed
-                        </label>
-                        <input
-                          type="number"
-                          min={1}
-                          value={projectForm.peopleNeeded}
-                          onChange={(e) =>
-                            setProjectForm((f) => ({
-                              ...f,
-                              peopleNeeded: parseInt(e.target.value) || 1,
-                            }))
-                          }
-                          className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                        />
-                      </div>
-                    </div>
-
-                    <SkillPicker
-                      label="Essential Skills"
-                      sub="Select the skills volunteers must have"
-                      selected={projectForm.essentialSkills}
-                      onChange={(s) =>
-                        setProjectForm((f) => ({ ...f, essentialSkills: s }))
-                      }
-                      minRequired={MIN_SKILLS}
-                    />
-
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1">
-                        Additional Information
-                      </label>
-                      <textarea
-                        value={projectForm.additionalInfo}
-                        onChange={(e) =>
-                          setProjectForm((f) => ({
-                            ...f,
-                            additionalInfo: e.target.value,
-                          }))
-                        }
-                        rows={2}
-                        placeholder="Anything else companies should know?"
-                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
-                      />
-                    </div>
-
-                    <div className="flex gap-3 pt-1">
-                      <button
-                        onClick={addProject}
-                        disabled={
-                          !projectForm.title.trim() ||
-                          projectForm.essentialSkills.length < MIN_SKILLS
-                        }
-                        className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-xl transition-colors"
-                      >
-                        Create Project
-                      </button>
-                      <button
-                        onClick={() => {
-                          setShowProjectForm(false);
-                          setProjectForm(emptyProjectForm());
-                        }}
-                        className="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-xl transition-colors"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Projects list */}
-              {projects.length === 0 && !showProjectForm ? (
-                <div className="text-center py-24 text-gray-400">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="w-12 h-12 mx-auto mb-4 opacity-30"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={1.5}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                    />
-                  </svg>
-                  <p className="text-sm font-medium">No projects yet</p>
-                  <p className="text-xs mt-1">
-                    Create your first project to start finding volunteer
-                    companies
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {projects.map((p) => {
-                    const volType = VOL_TYPES.find(
-                      (t) => t.v === p.volunteeringType,
-                    );
-                    const isMatched = !!selectedMatches[p.id];
-                    return (
-                      <div
-                        key={p.id}
-                        className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 hover:shadow-md transition-shadow"
-                      >
-                        <div className="flex items-start gap-4">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                              <h3 className="font-semibold text-gray-800">
-                                {p.title}
-                              </h3>
-                              <StatusBadge status={p.status} />
-                              {isMatched && (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700">
-                                  Matched
-                                </span>
-                              )}
-                            </div>
-                            {p.description && (
-                              <p className="text-sm text-gray-500 mb-3 leading-relaxed">
-                                {p.description}
-                              </p>
-                            )}
-                            <div className="flex flex-wrap gap-1.5 mb-3">
-                              {p.essentialSkills.map((s) => (
-                                <span
-                                  key={s}
-                                  className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full"
-                                >
-                                  {s}
-                                </span>
-                              ))}
-                            </div>
-                            <div className="flex flex-wrap gap-4 text-xs text-gray-400">
-                              {p.startDate && (
-                                <span>
-                                  📅 {p.startDate} →{" "}
-                                  {p.endDate || "TBD"}
-                                </span>
-                              )}
-                              <span>
-                                👥 {p.peopleNeeded} volunteer
-                                {p.peopleNeeded !== 1 ? "s" : ""} needed
-                              </span>
-                              {volType && <span>🏷 {volType.l}</span>}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => findMatches(p)}
-                            className="shrink-0 px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-semibold rounded-xl border border-emerald-200 transition-colors"
-                          >
-                            Find Matches
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── MATCHES TAB ── */}
-          {tab === "matches" && (
-            <div>
-              <h2 className="text-lg font-semibold text-gray-800 mb-6">
-                Company Matches
-              </h2>
-              {Object.keys(matchResults).length === 0 ? (
-                <div className="text-center py-24 text-gray-400">
-                  <p className="text-sm font-medium">No matches run yet</p>
-                  <p className="text-xs mt-1">
-                    Click &ldquo;Find Matches&rdquo; on a project to see
-                    suitable companies
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  {Object.entries(matchResults).map(
-                    ([projectId, results]) => {
-                      const project = projects.find(
-                        (p) => p.id === projectId,
-                      );
-                      if (!project) return null;
-                      return (
-                        <div
-                          key={projectId}
-                          className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden"
-                        >
-                          <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-3">
-                            <h3 className="font-semibold text-gray-800">
-                              {project.title}
-                            </h3>
-                            <StatusBadge status={project.status} />
-                          </div>
-
-                          {results.length === 0 ? (
-                            <p className="px-5 py-8 text-sm text-gray-400">
-                              No companies have expressed interest in this
-                              project yet.
-                            </p>
-                          ) : (
-                            <div className="divide-y divide-gray-50">
-                              {results.map((r, i) => {
-                                const isSelected =
-                                  selectedMatches[projectId] ===
-                                  r.companyId;
-                                const alreadyChosen =
-                                  !!selectedMatches[projectId];
-                                return (
-                                  <div
-                                    key={r.companyId}
-                                    className={`px-5 py-4 flex items-center gap-4 ${isSelected ? "bg-emerald-50" : ""}`}
-                                  >
-                                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-xs font-bold text-gray-500 shrink-0">
-                                      #{i + 1}
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                      <p className="font-semibold text-gray-800 text-sm mb-1">
-                                        {r.companyName}
-                                      </p>
-                                      <ScoreBar value={r.overall} />
-                                      <div className="flex flex-wrap gap-1 mt-2">
-                                        {r.matchedSkills.map((s) => (
-                                          <span
-                                            key={s}
-                                            className="px-1.5 py-0.5 bg-emerald-50 text-emerald-700 text-[10px] rounded font-medium"
-                                          >
-                                            ✓ {s}
-                                          </span>
-                                        ))}
-                                        {r.missingSkills.map((s) => (
-                                          <span
-                                            key={s}
-                                            className="px-1.5 py-0.5 bg-red-50 text-red-400 text-[10px] rounded font-medium"
-                                          >
-                                            ✗ {s}
-                                          </span>
-                                        ))}
-                                      </div>
-                                    </div>
-                                    <button
-                                      onClick={() =>
-                                        selectMatch(
-                                          projectId,
-                                          r.companyId,
-                                        )
-                                      }
-                                      disabled={alreadyChosen}
-                                      className={`shrink-0 px-4 py-2 text-sm font-semibold rounded-xl transition-colors ${
-                                        isSelected
-                                          ? "bg-emerald-500 text-white cursor-default"
-                                          : alreadyChosen
-                                            ? "bg-gray-100 text-gray-300 cursor-not-allowed"
-                                            : "bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200"
-                                      }`}
-                                    >
-                                      {isSelected ? "✓ Selected" : "Select"}
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    },
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </main>
-      </div>
-    );
-  }
-
-  // ============================================================
-  // COMPANY — REGISTRATION
-  // ============================================================
-
-  if (!myCompany) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center px-4 py-16">
-        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-lg w-full border border-gray-200">
-          <button
-            onClick={() => setRole(null)}
-            className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-6 transition-colors"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M15 19l-7-7 7-7"
-              />
-            </svg>
-            Back
-          </button>
-
-          <div className="flex items-center gap-3 mb-7">
-            <div className="w-12 h-12 rounded-full bg-teal-100 flex items-center justify-center">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="w-6 h-6 text-teal-600"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                />
-              </svg>
-            </div>
-            <div>
-              <h2 className="text-xl font-bold text-gray-800">
-                Register your Company
-              </h2>
-              <p className="text-sm text-gray-500">Connect 4 Good</p>
-            </div>
-          </div>
-
-          <div className="space-y-5">
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                Company Name <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={companyForm.name}
-                onChange={(e) =>
-                  setCompanyForm((f) => ({ ...f, name: e.target.value }))
-                }
-                placeholder="e.g. Acme Corp"
-                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                Short Bio
-              </label>
-              <textarea
-                value={companyForm.bio}
-                onChange={(e) =>
-                  setCompanyForm((f) => ({ ...f, bio: e.target.value }))
-                }
-                rows={2}
-                placeholder="A brief description of what your company does"
-                className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none"
-              />
-            </div>
-
-            <SkillPicker
-              label="Skills your team can offer"
-              sub="Select all skills your volunteers can contribute"
-              selected={companyForm.offeredSkills}
-              onChange={(s) =>
-                setCompanyForm((f) => ({ ...f, offeredSkills: s }))
-              }
-              minRequired={MIN_SKILLS}
-            />
-
+              {
+                r: "company" as Role,
+                title: "I'm a Company",
+                desc: "Register your skills and browse projects to support",
+                accent: "border-emerald-700 hover:bg-emerald-700 hover:text-white",
+                titleColor: "text-emerald-700",
+              },
+            ] as const
+          ).map(({ r, title, desc, accent, titleColor }) => (
             <button
-              onClick={registerCompany}
-              disabled={
-                !companyForm.name.trim() ||
-                companyForm.offeredSkills.length < MIN_SKILLS
-              }
-              className="w-full py-3 px-6 rounded-xl bg-teal-500 hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm shadow-md transition-colors focus:outline-none focus:ring-4 focus:ring-teal-300"
+              key={r}
+              onClick={() => {
+                setRole(r);
+                setPage("dashboard");
+              }}
+              className={`flex-1 text-left p-8 bg-white rounded-2xl border-2 shadow-sm cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md group ${accent}`}
             >
-              Register Company
+              <div className={`text-lg font-bold mb-2 transition-colors ${titleColor} group-hover:text-inherit`}>
+                {title}
+              </div>
+              <div className="text-sm text-gray-500 leading-relaxed group-hover:text-inherit/80">
+                {desc}
+              </div>
             </button>
-          </div>
+          ))}
         </div>
       </div>
     );
   }
 
+  const isCharity = role === "charity";
+  const hasResponses = responses.length > 0;
+
+  type NavItem = { k: Page; l: string; special?: boolean };
+  const navItems: NavItem[] = isCharity
+    ? [
+        { k: "dashboard", l: "Dashboard" },
+        { k: "new_project", l: "New Project" },
+        ...(hasResponses
+          ? [{ k: "review" as Page, l: `Review Responses (${responses.length})`, special: true }]
+          : []),
+      ]
+    : [
+        { k: "dashboard", l: "Dashboard" },
+        { k: "register", l: "Register Company" },
+        { k: "browse", l: "Browse Projects" },
+      ];
+
   // ============================================================
-  // COMPANY DASHBOARD
+  // SHARED LAYOUT WRAPPER
   // ============================================================
 
-  const myNotifs = notifications.filter((n) => n.companyId === myCompany.id);
+  const accentTw = isCharity
+    ? "bg-slate-900 text-white"
+    : "bg-emerald-700 text-white";
+  const ringTw = isCharity ? "focus:ring-slate-400" : "focus:ring-emerald-400";
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-gray-100">
+      {/* Top bar */}
+      <header className="bg-white border-b border-gray-100 sticky top-0 z-20 shadow-sm">
+        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="w-4 h-4 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                />
-              </svg>
-            </div>
-            <span className="font-bold text-gray-800 text-sm">
-              Connect 4 Good
+            <Link to="/" className="flex items-center gap-2 group">
+              <div className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                </svg>
+              </div>
+              <span className="text-sm font-bold text-gray-700 group-hover:text-gray-900 transition-colors hidden sm:inline">
+                Connect 4 Good
+              </span>
+            </Link>
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-widest ${accentTw}`}>
+              {isCharity ? "Charity" : "Company"}
             </span>
-            <span className="text-xs bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full font-semibold">
-              Company
-            </span>
-            <span className="text-sm text-gray-600 font-medium hidden sm:inline">
-              {myCompany.name}
-            </span>
+            <h1 className="text-base font-bold text-gray-900 hidden sm:block">
+              {isCharity ? "Project Hub" : "Partnership Hub"}
+            </h1>
           </div>
           <button
-            onClick={() => setRole(null)}
-            className="text-sm text-gray-400 hover:text-gray-600 transition-colors"
+            onClick={switchRole}
+            className="text-xs font-semibold text-gray-500 hover:text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 transition-colors"
           >
-            Switch role
+            Switch Role
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="max-w-5xl mx-auto px-4 flex">
-          {[
-            {
-              id: "browse",
-              label: "Browse Projects",
-              count: projects.length,
-            },
-            {
-              id: "interests",
-              label: "My Interests",
-              count: myCompany.preferredProjectIds.length,
-            },
-            {
-              id: "notifications",
-              label: "Notifications",
-              count: myNotifs.length,
-            },
-          ].map((t) => (
+        {/* Nav */}
+        <div className="max-w-3xl mx-auto px-4 pb-0 flex gap-1 flex-wrap">
+          {navItems.map((n) => (
             <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-                tab === t.id
-                  ? "border-teal-500 text-teal-600"
+              key={n.k}
+              onClick={() => navigate(n.k)}
+              className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors ${
+                n.special
+                  ? "border-emerald-500 text-emerald-600 bg-emerald-50"
+                  : page === n.k
+                  ? isCharity
+                    ? "border-slate-900 text-slate-900"
+                    : "border-emerald-600 text-emerald-700"
                   : "border-transparent text-gray-500 hover:text-gray-700"
               }`}
             >
-              {t.label}
-              {t.count > 0 && (
-                <span className="ml-1.5 bg-teal-100 text-teal-600 text-xs px-1.5 py-0.5 rounded-full">
-                  {t.count}
-                </span>
-              )}
+              {n.l}
             </button>
           ))}
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-8">
-        {/* ── BROWSE PROJECTS ── */}
-        {tab === "browse" && (
-          <div>
-            <h2 className="text-lg font-semibold text-gray-800 mb-6">
-              Open Projects
-            </h2>
+      <main className="max-w-3xl mx-auto px-4 py-8">
+        {/* ====================================================
+            CHARITY: DASHBOARD
+        ==================================================== */}
+        {isCharity && page === "dashboard" && (
+          <div className="space-y-6">
+            {/* Stats */}
+            <div className="flex gap-3 flex-wrap">
+              <StatCard label="Projects"  value={projects.length} color="#0f2942" />
+              <StatCard label="Open"      value={openProjects.length} color="#2563eb" />
+              <StatCard label="Responses" value={responses.length} color="#7c3aed" />
+              <StatCard
+                label="Matched"
+                value={projects.filter((p) => p.projectStatus === "matched").length}
+                color="#16a34a"
+              />
+            </div>
+
+            {/* Confirmed matches banner */}
+            {Object.keys(selectedMatches).length > 0 && (
+              <div className="bg-emerald-50 border-2 border-emerald-300 rounded-xl p-5">
+                <p className="text-sm font-bold text-emerald-800 mb-3">
+                  Confirmed Matches
+                </p>
+                {Object.entries(selectedMatches).map(([projId, compId]) => {
+                  const proj = projects.find((p) => p.id === projId);
+                  const comp = companies.find((c) => c.id === compId);
+                  return (
+                    <div
+                      key={projId}
+                      className="py-2 border-b border-emerald-200 last:border-0 text-sm text-emerald-900"
+                    >
+                      <strong>{proj?.title}</strong> matched with{" "}
+                      <strong>{comp?.name}</strong>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Project list */}
             {projects.length === 0 ? (
-              <div className="text-center py-24 text-gray-400">
-                <p className="text-sm font-medium">
-                  No projects available yet
-                </p>
-                <p className="text-xs mt-1">
-                  Check back soon as charities post new projects
-                </p>
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm text-center py-16 text-gray-400">
+                <p className="text-sm">No projects yet.</p>
+                <button
+                  onClick={() => navigate("new_project")}
+                  className="mt-3 text-sm font-semibold text-slate-700 underline underline-offset-2"
+                >
+                  Create your first proposal
+                </button>
               </div>
             ) : (
-              <div className="space-y-4">
+              <div className="space-y-3">
                 {projects.map((p) => {
-                  const volType = VOL_TYPES.find(
-                    (t) => t.v === p.volunteeringType,
-                  );
-                  const interested =
-                    myCompany.preferredProjectIds.includes(p.id);
-                  const skillMatch = computeSkillsScore(
-                    p.essentialSkills,
-                    myCompany.offeredSkills,
+                  const vol = VOL_TYPES.find((v) => v.v === p.volunteeringType);
+                  const projResponses = responses.filter(
+                    (r) => r.projectId === p.id,
                   );
                   return (
                     <div
                       key={p.id}
-                      className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 hover:shadow-md transition-shadow"
+                      className="bg-white rounded-xl border border-gray-100 shadow-sm p-5"
                     >
-                      <div className="flex items-start gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                            <h3 className="font-semibold text-gray-800">
-                              {p.title}
-                            </h3>
-                            <StatusBadge status={p.status} />
-                          </div>
-                          {p.description && (
-                            <p className="text-sm text-gray-500 mb-3 leading-relaxed">
-                              {p.description}
-                            </p>
-                          )}
-                          <div className="flex flex-wrap gap-1.5 mb-3">
-                            {p.essentialSkills.map((s) => {
-                              const have =
-                                myCompany.offeredSkills.includes(s);
-                              return (
-                                <span
-                                  key={s}
-                                  className={`px-2 py-0.5 text-xs rounded-full ${
-                                    have
-                                      ? "bg-emerald-50 text-emerald-700 font-medium"
-                                      : "bg-gray-100 text-gray-500"
-                                  }`}
-                                >
-                                  {have ? "✓ " : ""}
-                                  {s}
-                                </span>
-                              );
-                            })}
-                          </div>
-                          <div className="flex flex-wrap gap-4 text-xs text-gray-400 mb-3">
-                            {p.startDate && (
-                              <span>
-                                📅 {p.startDate} →{" "}
-                                {p.endDate || "TBD"}
-                              </span>
-                            )}
-                            <span>
-                              👥 {p.peopleNeeded} volunteer
-                              {p.peopleNeeded !== 1 ? "s" : ""} needed
-                            </span>
-                            {volType && <span>🏷 {volType.l}</span>}
-                          </div>
-                          <div className="flex items-center gap-2 max-w-xs">
-                            <span className="text-xs text-gray-500 shrink-0">
-                              Your match:
-                            </span>
-                            <ScoreBar value={skillMatch.score} />
-                          </div>
+                      <div className="flex items-start justify-between gap-3 mb-3">
+                        <h3 className="font-bold text-gray-900">{p.title}</h3>
+                        <div className="flex gap-2 shrink-0">
+                          <StatusBadge status={p.status} />
+                          <LifecycleBadge status={p.projectStatus} />
                         </div>
-                        <button
-                          onClick={() => toggleInterest(p.id)}
-                          className={`shrink-0 px-4 py-2 text-sm font-semibold rounded-xl border transition-colors ${
-                            interested
-                              ? "bg-teal-500 text-white border-teal-500 hover:bg-teal-600"
-                              : "bg-teal-50 hover:bg-teal-100 text-teal-700 border-teal-200"
-                          }`}
-                        >
-                          {interested ? "✓ Interested" : "Express Interest"}
-                        </button>
                       </div>
+                      <p className="text-sm text-gray-500 leading-relaxed mb-3">
+                        {p.description}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {p.essentialSkills.map((s) => (
+                          <SkillTag key={s} skill={s} />
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap gap-4 text-xs text-gray-400 font-semibold">
+                        {p.startDate && (
+                          <span>
+                            {p.startDate} → {p.endDate}
+                          </span>
+                        )}
+                        <span>
+                          {p.peopleNeeded} volunteer
+                          {p.peopleNeeded !== 1 ? "s" : ""}
+                        </span>
+                        {vol && <span>{vol.l}</span>}
+                        {projResponses.length > 0 && (
+                          <span className="text-purple-600">
+                            {projResponses.length} response
+                            {projResponses.length !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                      {p.additionalInfo && (
+                        <div className="mt-3 pl-3 border-l-2 border-gray-200 text-xs text-gray-500 leading-relaxed">
+                          {p.additionalInfo}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1288,123 +901,678 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ── MY INTERESTS ── */}
-        {tab === "interests" && (
-          <div>
-            <h2 className="text-lg font-semibold text-gray-800 mb-6">
-              Projects I&apos;m Interested In
+        {/* ====================================================
+            CHARITY: NEW PROJECT
+        ==================================================== */}
+        {isCharity && page === "new_project" && (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8">
+            <h2 className="text-xl font-bold text-gray-900 mb-7">
+              New Project Proposal
             </h2>
-            {myCompany.preferredProjectIds.length === 0 ? (
-              <div className="text-center py-24 text-gray-400">
-                <p className="text-sm font-medium">No interests yet</p>
-                <p className="text-xs mt-1">
-                  Browse projects and click &ldquo;Express Interest&rdquo; to
-                  get matched
-                </p>
+            <div className="space-y-6">
+              {/* Title */}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-1">
+                  Project Title <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={projForm.title}
+                  onChange={(e) =>
+                    setProjForm({ ...projForm, title: e.target.value })
+                  }
+                  placeholder="e.g. Community Digital Literacy Programme"
+                  maxLength={120}
+                  className={`w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 ${ringTw} bg-gray-50`}
+                />
               </div>
-            ) : (
-              <div className="space-y-4">
-                {projects
-                  .filter((p) =>
-                    myCompany.preferredProjectIds.includes(p.id),
-                  )
-                  .map((p) => {
-                    const isMatched =
-                      selectedMatches[p.id] === myCompany.id;
-                    return (
+
+              {/* Description */}
+              <div>
+                <div className="flex justify-between items-baseline mb-1">
+                  <label className="text-sm font-bold text-gray-700 tracking-wide">
+                    Project Description <span className="text-red-500">*</span>
+                  </label>
+                  <span
+                    className={`text-xs font-bold tabular-nums ${
+                      projForm.description.length >= CHAR_LIMIT
+                        ? "text-red-500"
+                        : projForm.description.length > CHAR_LIMIT * 0.85
+                        ? "text-yellow-500"
+                        : "text-gray-400"
+                    }`}
+                  >
+                    {projForm.description.length}/{CHAR_LIMIT}
+                  </span>
+                </div>
+                <textarea
+                  rows={4}
+                  value={projForm.description}
+                  onChange={(e) => {
+                    if (e.target.value.length <= CHAR_LIMIT)
+                      setProjForm({ ...projForm, description: e.target.value });
+                  }}
+                  placeholder="Describe your project goals, what support you need, and expected outcomes..."
+                  className={`w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 ${ringTw} resize-none bg-gray-50`}
+                />
+                {/* Progress bar */}
+                <div className="h-1 bg-gray-100 rounded-full mt-1.5 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-200 ${
+                      projForm.description.length >= CHAR_LIMIT
+                        ? "bg-red-500"
+                        : "bg-slate-700"
+                    }`}
+                    style={{
+                      width: `${Math.min((projForm.description.length / CHAR_LIMIT) * 100, 100)}%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Status */}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-2">
+                  Project Status
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {STATUSES.map((s) => (
+                    <button
+                      key={s.v}
+                      type="button"
+                      onClick={() => setProjForm({ ...projForm, status: s.v })}
+                      className={`px-4 py-1.5 rounded-lg text-xs font-semibold border-2 transition-all ${
+                        projForm.status === s.v
+                          ? s.tw
+                          : "bg-white border-gray-200 text-gray-400 hover:border-gray-300"
+                      }`}
+                    >
+                      {s.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Skills */}
+              <SkillPicker
+                label="Essential Skills"
+                sub="Select the skills needed for this project (minimum 3)"
+                selected={projForm.essentialSkills}
+                onChange={(s) => setProjForm({ ...projForm, essentialSkills: s })}
+                minRequired={MIN_SKILLS}
+              />
+
+              {/* Dates + headcount */}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-2">
+                  Estimated Support Required
+                </label>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">Start Date</p>
+                    <input
+                      type="date"
+                      value={projForm.startDate}
+                      onChange={(e) =>
+                        setProjForm({ ...projForm, startDate: e.target.value })
+                      }
+                      className={`w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 ${ringTw}`}
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">End Date</p>
+                    <input
+                      type="date"
+                      value={projForm.endDate}
+                      onChange={(e) =>
+                        setProjForm({ ...projForm, endDate: e.target.value })
+                      }
+                      className={`w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 ${ringTw}`}
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">People Needed</p>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={projForm.peopleNeeded}
+                      onChange={(e) =>
+                        setProjForm({
+                          ...projForm,
+                          peopleNeeded: Math.max(1, parseInt(e.target.value) || 1),
+                        })
+                      }
+                      className={`w-full px-3 py-2 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 ${ringTw}`}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Volunteering type */}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-2">
+                  Type of Volunteering <span className="text-red-500">*</span>
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {VOL_TYPES.map((v) => (
+                    <button
+                      key={v.v}
+                      type="button"
+                      onClick={() =>
+                        setProjForm({ ...projForm, volunteeringType: v.v })
+                      }
+                      className={`text-left p-3 rounded-xl border-2 transition-all duration-150 ${
+                        projForm.volunteeringType === v.v
+                          ? "border-slate-900 bg-slate-50"
+                          : "border-gray-200 bg-white hover:border-gray-300"
+                      }`}
+                    >
                       <div
-                        key={p.id}
-                        className={`bg-white rounded-2xl shadow-sm border p-5 ${
-                          isMatched
-                            ? "border-emerald-300"
-                            : "border-gray-200"
+                        className={`text-xs font-bold mb-0.5 ${
+                          projForm.volunteeringType === v.v
+                            ? "text-slate-900"
+                            : "text-gray-700"
                         }`}
                       >
-                        <div className="flex items-start gap-4">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1 flex-wrap">
-                              <h3 className="font-semibold text-gray-800">
-                                {p.title}
-                              </h3>
-                              <StatusBadge status={p.status} />
-                              {isMatched && (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700">
-                                  Matched!
+                        {v.l}
+                      </div>
+                      <div className="text-[10px] text-gray-400">{v.d}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Additional info */}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-1">
+                  Additional Information
+                </label>
+                <p className="text-xs text-gray-400 mb-2">
+                  Any other details, requirements, or context for companies
+                </p>
+                <textarea
+                  rows={3}
+                  value={projForm.additionalInfo}
+                  onChange={(e) =>
+                    setProjForm({ ...projForm, additionalInfo: e.target.value })
+                  }
+                  placeholder="e.g. We'd prefer a team with prior experience working with vulnerable communities..."
+                  className={`w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 ${ringTw} resize-none bg-gray-50`}
+                />
+              </div>
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  onClick={createProject}
+                  disabled={!projValid}
+                  className="flex-1 py-3 px-6 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-bold shadow-sm transition-colors"
+                >
+                  Create Project
+                </button>
+                <button
+                  onClick={() => {
+                    setProjForm(emptyProj());
+                    navigate("dashboard");
+                  }}
+                  className="py-3 px-6 rounded-xl border border-gray-200 bg-white text-gray-500 text-sm font-semibold hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ====================================================
+            CHARITY: REVIEW RESPONSES
+        ==================================================== */}
+        {isCharity && page === "review" && (
+          <div className="space-y-6">
+            <div className="text-center mb-2">
+              <h2 className="text-xl font-bold text-gray-900">
+                Company Responses
+              </h2>
+              <p className="text-sm text-gray-400 mt-1">
+                Review responses from interested companies and select your match.
+              </p>
+            </div>
+
+            {projects
+              .filter((p) => responses.some((r) => r.projectId === p.id))
+              .map((proj) => {
+                const ranked = rankResponses(proj, responses, companies);
+                return (
+                  <div
+                    key={proj.id}
+                    className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden"
+                  >
+                    {/* Project header */}
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <h3 className="font-bold text-gray-900">{proj.title}</h3>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {ranked.length} response
+                        {ranked.length !== 1 ? "s" : ""} ·{" "}
+                        {proj.essentialSkills.map(toLabel).join(", ")}
+                      </p>
+                    </div>
+
+                    <div className="p-5 space-y-4">
+                      {ranked.map((r, i) => {
+                        const chosen = selectedMatches[proj.id] === r.companyId;
+                        const locked = !!selectedMatches[proj.id];
+                        const rankColors = [
+                          "bg-slate-900 text-white",
+                          "bg-slate-600 text-white",
+                          "bg-gray-300 text-gray-700",
+                        ];
+                        return (
+                          <div
+                            key={r.companyId}
+                            className={`rounded-xl border-2 p-5 transition-all ${
+                              chosen
+                                ? "border-emerald-400 bg-emerald-50"
+                                : "border-gray-100 bg-gray-50"
+                            }`}
+                          >
+                            {/* Company header */}
+                            <div className="flex items-center justify-between mb-3">
+                              <div className="flex items-center gap-3">
+                                <span
+                                  className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold ${rankColors[i] ?? "bg-gray-200 text-gray-600"}`}
+                                >
+                                  {i + 1}
                                 </span>
-                              )}
+                                <span className="font-bold text-gray-900">
+                                  {r.companyName}
+                                </span>
+                              </div>
+                              <span className="text-xs font-bold text-emerald-600 tabular-nums">
+                                {r.overlap.count}/{r.overlap.total} skills
+                              </span>
                             </div>
-                            {p.description && (
-                              <p className="text-sm text-gray-500">
-                                {p.description}
+
+                            {r.companyBio && (
+                              <p className="text-xs italic text-gray-500 mb-3 ml-9">
+                                {r.companyBio}
                               </p>
                             )}
+
+                            {/* Meeting block */}
+                            <div className="ml-9 bg-cyan-50 border border-cyan-200 rounded-lg px-4 py-3 mb-3">
+                              <p className="text-[11px] font-bold text-cyan-700 mb-1">
+                                Meeting Requested
+                              </p>
+                              <p className="text-xs text-gray-700">
+                                {r.meetingDate} at {r.meetingTime}
+                                {r.meetingNote && (
+                                  <span className="text-gray-400">
+                                    {" "}— {r.meetingNote}
+                                  </span>
+                                )}
+                              </p>
+                            </div>
+
+                            {/* Availability */}
+                            <div className="ml-9 flex flex-wrap gap-4 text-xs text-gray-400 font-semibold mb-3">
+                              <span>{r.peopleAvailable} people available</span>
+                              <span>
+                                {r.availableFrom} → {r.availableUntil}
+                              </span>
+                            </div>
+
+                            {/* Offer description */}
+                            <div className="ml-9 pl-3 border-l-2 border-gray-200 text-xs text-gray-600 leading-relaxed mb-3">
+                              {r.description}
+                            </div>
+
+                            {/* Skill match */}
+                            <div className="ml-9 flex flex-wrap gap-1.5 mb-4">
+                              {proj.essentialSkills.map((s) => (
+                                <SkillTag
+                                  key={s}
+                                  skill={s}
+                                  highlight={r.overlap.matched.includes(
+                                    s.toLowerCase(),
+                                  )}
+                                />
+                              ))}
+                            </div>
+
+                            {/* Action */}
+                            <div className="ml-9">
+                              {chosen ? (
+                                <p className="text-center text-sm font-bold text-emerald-700 py-1">
+                                  ✓ Matched
+                                </p>
+                              ) : !locked ? (
+                                <button
+                                  onClick={() =>
+                                    selectMatch(proj.id, r.companyId)
+                                  }
+                                  className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold transition-colors"
+                                >
+                                  Select {r.companyName}
+                                </button>
+                              ) : null}
+                            </div>
                           </div>
-                          <button
-                            onClick={() => toggleInterest(p.id)}
-                            className="shrink-0 px-3 py-1.5 text-xs text-red-500 hover:text-red-700 border border-red-200 hover:bg-red-50 rounded-lg transition-colors"
-                          >
-                            Withdraw
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+
+            {!projects.some((p) =>
+              responses.some((r) => r.projectId === p.id),
+            ) && (
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm text-center py-16 text-gray-400">
+                <p className="text-sm">No responses yet.</p>
+              </div>
+            )}
+
+            <div className="text-center">
+              <button
+                onClick={() => navigate("dashboard")}
+                className="px-6 py-2.5 rounded-lg border border-gray-200 bg-white text-sm font-semibold text-gray-500 hover:bg-gray-50 transition-colors"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ====================================================
+            COMPANY: DASHBOARD
+        ==================================================== */}
+        {!isCharity && page === "dashboard" && (
+          <div className="space-y-6">
+            {/* Stats */}
+            <div className="flex gap-3 flex-wrap">
+              <StatCard label="Your Companies"  value={companies.length}  color="#16a34a" />
+              <StatCard label="Open Projects"   value={openProjects.length} color="#2563eb" />
+              <StatCard label="Responses Sent"  value={responses.length}   color="#7c3aed" />
+            </div>
+
+            {/* Match notifications */}
+            {Object.keys(compNotifs).length > 0 && (
+              <div className="bg-emerald-50 border-2 border-emerald-300 rounded-xl p-5">
+                <p className="text-sm font-bold text-emerald-800 mb-3">
+                  You&apos;ve Been Matched!
+                </p>
+                {Object.entries(compNotifs).map(([cid, titles]) => {
+                  const comp = companies.find((c) => c.id === cid);
+                  return titles.map((t, i) => (
+                    <div
+                      key={`${cid}-${i}`}
+                      className="py-2 border-b border-emerald-200 last:border-0 text-sm text-emerald-900"
+                    >
+                      <strong>{comp?.name}</strong> has been selected for{" "}
+                      <strong>&ldquo;{t}&rdquo;</strong>
+                    </div>
+                  ));
+                })}
+              </div>
+            )}
+
+            {/* Company cards */}
+            {companies.length === 0 ? (
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm text-center py-16 text-gray-400">
+                <p className="text-sm">No companies registered yet.</p>
+                <button
+                  onClick={() => navigate("register")}
+                  className="mt-3 text-sm font-semibold text-emerald-700 underline underline-offset-2"
+                >
+                  Register your company
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {companies.map((c) => (
+                  <div
+                    key={c.id}
+                    className="bg-white rounded-xl border border-gray-100 shadow-sm p-5"
+                  >
+                    <h3 className="font-bold text-gray-900 mb-1">{c.name}</h3>
+                    {c.bio && (
+                      <p className="text-sm text-gray-500 leading-relaxed mb-3">
+                        {c.bio}
+                      </p>
+                    )}
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {c.offeredSkills.map((s) => (
+                        <span
+                          key={s}
+                          className="px-2 py-0.5 bg-emerald-50 text-emerald-800 text-xs rounded-full font-semibold"
+                        >
+                          {toLabel(s)}
+                        </span>
+                      ))}
+                    </div>
+                    <p className="text-xs text-gray-400 font-semibold">
+                      {c.offeredSkills.length} skill
+                      {c.offeredSkills.length !== 1 ? "s" : ""} offered
+                      {c.preferredProjectIds.length > 0 && (
+                        <span className="text-emerald-600">
+                          {" "}· Responded to {c.preferredProjectIds.length} project
+                          {c.preferredProjectIds.length !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                ))}
               </div>
             )}
           </div>
         )}
 
-        {/* ── NOTIFICATIONS ── */}
-        {tab === "notifications" && (
-          <div>
-            <h2 className="text-lg font-semibold text-gray-800 mb-6">
-              Notifications
+        {/* ====================================================
+            COMPANY: REGISTER
+        ==================================================== */}
+        {!isCharity && page === "register" && (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8">
+            <h2 className="text-xl font-bold text-gray-900 mb-7">
+              Register Company
             </h2>
-            {myNotifs.length === 0 ? (
-              <div className="text-center py-24 text-gray-400">
-                <p className="text-sm font-medium">No notifications yet</p>
-                <p className="text-xs mt-1">
-                  You&apos;ll be notified when a charity selects your company
-                  for a project
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-1">
+                  Company Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={compForm.name}
+                  onChange={(e) =>
+                    setCompForm({ ...compForm, name: e.target.value })
+                  }
+                  placeholder="e.g. TechForGood Ltd"
+                  className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-gray-50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 tracking-wide mb-1">
+                  Company Bio
+                </label>
+                <p className="text-xs text-gray-400 mb-2">
+                  Tell charities a bit about your company and what drives you
                 </p>
+                <textarea
+                  rows={3}
+                  value={compForm.bio}
+                  onChange={(e) =>
+                    setCompForm({ ...compForm, bio: e.target.value })
+                  }
+                  placeholder="e.g. We're a London-based tech consultancy passionate about using technology for social good..."
+                  className="w-full px-3 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none bg-gray-50"
+                />
               </div>
+
+              <SkillPicker
+                label="Skills You Can Offer"
+                sub="Select all skills your team can provide"
+                selected={compForm.offeredSkills}
+                onChange={(s) =>
+                  setCompForm({ ...compForm, offeredSkills: s })
+                }
+              />
+
+              <div className="flex gap-3">
+                <button
+                  onClick={createCompany}
+                  disabled={
+                    !compForm.name.trim() || compForm.offeredSkills.length === 0
+                  }
+                  className="flex-1 py-3 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-bold shadow-sm transition-colors"
+                >
+                  Register
+                </button>
+                <button
+                  onClick={() => {
+                    setCompForm(emptyComp());
+                    navigate("dashboard");
+                  }}
+                  className="py-3 px-6 rounded-xl border border-gray-200 bg-white text-gray-500 text-sm font-semibold hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ====================================================
+            COMPANY: BROWSE + RESPONSE FORM
+        ==================================================== */}
+        {!isCharity && page === "browse" && (
+          <div className="space-y-5">
+            {companies.length === 0 ? (
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm text-center py-16 text-gray-400">
+                <p className="text-sm">
+                  Register a company first to browse projects.
+                </p>
+                <button
+                  onClick={() => navigate("register")}
+                  className="mt-3 text-sm font-semibold text-emerald-700 underline underline-offset-2"
+                >
+                  Register now
+                </button>
+              </div>
+            ) : respondingTo ? (
+              (() => {
+                const proj = projects.find(
+                  (p) => p.id === respondingTo.projectId,
+                );
+                const comp = companies.find(
+                  (c) => c.id === respondingTo.companyId,
+                );
+                if (!proj || !comp) return null;
+                return (
+                  <ProjectResponseForm
+                    project={proj}
+                    company={comp}
+                    onSubmit={submitResponse}
+                    onCancel={() => setRespondingTo(null)}
+                  />
+                );
+              })()
             ) : (
-              <div className="space-y-3">
-                {myNotifs.map((n, i) => (
+              companies.map((comp) => {
+                const matched = getMatchedProjects(projects, comp);
+                const alreadyResponded = new Set(
+                  responses
+                    .filter((r) => r.companyId === comp.id)
+                    .map((r) => r.projectId),
+                );
+                return (
                   <div
-                    key={i}
-                    className="bg-white rounded-2xl shadow-sm border border-emerald-200 px-5 py-4 flex items-center gap-4"
+                    key={comp.id}
+                    className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden"
                   >
-                    <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center shrink-0">
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        className="w-5 h-5 text-emerald-600"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M5 13l4 4L19 7"
-                        />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-sm font-semibold text-gray-800">
-                        You&apos;ve been matched!
-                      </p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        A charity has selected your company for{" "}
-                        <span className="font-medium text-emerald-600">
-                          &ldquo;{n.projectTitle}&rdquo;
-                        </span>
+                    <div className="px-5 py-4 border-b border-gray-100">
+                      <h3 className="font-bold text-gray-900">{comp.name}</h3>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        Projects matching your skills ({matched.length} found)
                       </p>
                     </div>
+
+                    {matched.length === 0 ? (
+                      <p className="px-5 py-8 text-sm text-gray-400">
+                        No projects match your current skills yet.
+                      </p>
+                    ) : (
+                      <div className="p-4 space-y-3">
+                        {matched.map((proj) => {
+                          const responded = alreadyResponded.has(proj.id);
+                          const vol = VOL_TYPES.find(
+                            (v) => v.v === proj.volunteeringType,
+                          );
+                          return (
+                            <div
+                              key={proj.id}
+                              className={`rounded-xl border p-4 transition-all ${
+                                responded
+                                  ? "border-emerald-200 bg-emerald-50"
+                                  : "border-gray-200 bg-white hover:border-gray-300"
+                              }`}
+                            >
+                              <h4 className="font-bold text-sm text-gray-900 mb-1">
+                                {proj.title}
+                              </h4>
+                              <p className="text-xs text-gray-500 leading-relaxed mb-3">
+                                {proj.description}
+                              </p>
+                              <div className="flex flex-wrap gap-1.5 mb-2">
+                                {proj.essentialSkills.map((s) => (
+                                  <SkillTag
+                                    key={s}
+                                    skill={s}
+                                    highlight={proj.overlap.matched.includes(
+                                      s.toLowerCase(),
+                                    )}
+                                  />
+                                ))}
+                              </div>
+                              <div className="flex flex-wrap gap-4 text-xs text-gray-400 font-semibold mb-3">
+                                {proj.startDate && (
+                                  <span>
+                                    {proj.startDate} → {proj.endDate}
+                                  </span>
+                                )}
+                                <span>{proj.peopleNeeded} people</span>
+                                {vol && <span>{vol.l}</span>}
+                                <span className="text-emerald-600 font-bold">
+                                  {proj.overlap.count}/{proj.overlap.total}{" "}
+                                  skills matched
+                                </span>
+                              </div>
+
+                              {responded ? (
+                                <p className="text-center text-xs font-bold text-emerald-700 py-1">
+                                  ✓ Response Submitted
+                                </p>
+                              ) : (
+                                <button
+                                  onClick={() =>
+                                    setRespondingTo({
+                                      projectId: proj.id,
+                                      companyId: comp.id,
+                                    })
+                                  }
+                                  className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold transition-colors"
+                                >
+                                  Respond to Project
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                ))}
-              </div>
+                );
+              })
             )}
           </div>
         )}
