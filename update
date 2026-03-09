@@ -1,0 +1,888 @@
+import React, { useState, useCallback, useMemo, CSSProperties } from "react";
+
+// =============================================================================
+// TYPES
+// =============================================================================
+
+type Role = "charity" | "company";
+type Page = "dashboard" | "new_project" | "register" | "browse" | "review";
+type ProjectStatusValue = "planning" | "ready_to_start" | "in_progress" | "on_hold" | "next_iteration";
+type ProjectLifecycle = "open" | "matched";
+type CompanyStatus = "available" | "engaged" | "inactive";
+type VolunteeringType = "in_person" | "remote" | "hybrid" | "event_based" | "skills_based" | "mentoring";
+
+interface StatusOption {
+  v: ProjectStatusValue;
+  l: string;
+  c: string;
+  bg: string;
+}
+
+interface VolTypeOption {
+  v: VolunteeringType;
+  l: string;
+  d: string;
+}
+
+interface SkillOverlap {
+  matched: string[];
+  count: number;
+  total: number;
+}
+
+interface Project {
+  id: string;
+  charityId: string;
+  title: string;
+  description: string;
+  status: ProjectStatusValue;
+  essentialSkills: string[];
+  startDate: string;
+  endDate: string;
+  peopleNeeded: number;
+  volunteeringType: VolunteeringType | "";
+  additionalInfo: string;
+  projectStatus: ProjectLifecycle;
+}
+
+interface ProjectWithOverlap extends Project {
+  overlap: SkillOverlap;
+}
+
+interface Company {
+  id: string;
+  name: string;
+  bio: string;
+  offeredSkills: string[];
+  status: CompanyStatus;
+  preferredProjectIds: string[];
+}
+
+interface ResponseFormData {
+  meetingDate: string;
+  meetingTime: string;
+  meetingNote: string;
+  peopleAvailable: number;
+  availableFrom: string;
+  availableUntil: string;
+  description: string;
+}
+
+interface CompanyResponse extends ResponseFormData {
+  companyId: string;
+  projectId: string;
+  submittedAt: string;
+}
+
+interface RankedResponse extends CompanyResponse {
+  companyName: string;
+  companyBio: string;
+  overlap: SkillOverlap;
+}
+
+interface Notification {
+  companyId: string;
+  projectTitle: string;
+}
+
+interface NavItem {
+  k: Page | "run_match";
+  l: string;
+  special?: boolean;
+}
+
+interface ProjectFormState {
+  title: string;
+  description: string;
+  status: ProjectStatusValue;
+  essentialSkills: string[];
+  startDate: string;
+  endDate: string;
+  peopleNeeded: number;
+  volunteeringType: VolunteeringType | "";
+  additionalInfo: string;
+}
+
+interface CompanyFormState {
+  name: string;
+  bio: string;
+  offeredSkills: string[];
+}
+
+interface RespondingTo {
+  projectId: string;
+  companyId: string;
+}
+
+// =============================================================================
+// MATCHING: skill overlap filter
+// =============================================================================
+
+function getSkillOverlap(projectSkills: string[], companySkills: string[]): SkillOverlap {
+  const proj = new Set(projectSkills.map((s: string) => s.toLowerCase()));
+  const comp = new Set(companySkills.map((s: string) => s.toLowerCase()));
+  const matched = [...proj].filter((s: string) => comp.has(s));
+  return { matched, count: matched.length, total: proj.size };
+}
+
+function getMatchedProjects(projects: Project[], company: Company): ProjectWithOverlap[] {
+  return projects
+    .filter((p: Project) => p.projectStatus === "open")
+    .map((p: Project) => {
+      const overlap = getSkillOverlap(p.essentialSkills, company.offeredSkills);
+      return { ...p, overlap };
+    })
+    .filter((p: ProjectWithOverlap) => p.overlap.count > 0)
+    .sort((a: ProjectWithOverlap, b: ProjectWithOverlap) => b.overlap.count - a.overlap.count);
+}
+
+function rankResponses(project: Project, responses: CompanyResponse[], companies: Company[]): RankedResponse[] {
+  return responses
+    .filter((r: CompanyResponse) => r.projectId === project.id)
+    .map((r: CompanyResponse) => {
+      const comp = companies.find((c: Company) => c.id === r.companyId);
+      const overlap = getSkillOverlap(project.essentialSkills, comp?.offeredSkills || []);
+      return { ...r, companyName: comp?.name || "Unknown", companyBio: comp?.bio || "", overlap };
+    })
+    .sort((a: RankedResponse, b: RankedResponse) => b.overlap.count - a.overlap.count);
+}
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const SKILLS: string[] = [
+  "Web Development", "Mobile Development", "UI/UX Design", "Data Analysis",
+  "Database Management", "Project Management", "Graphic Design", "Copywriting",
+  "SEO", "Marketing", "Legal Advice", "Accounting", "Fundraising",
+  "Event Planning", "Photography", "Video Production", "Social Media",
+  "DevOps", "Cybersecurity", "Training & Mentoring",
+  "Interview Prep", "Presentations", "Upskill",
+];
+
+const STATUSES: StatusOption[] = [
+  { v: "planning", l: "Planning", c: "#7c3aed", bg: "#f5f3ff" },
+  { v: "ready_to_start", l: "Ready to Start", c: "#2563eb", bg: "#eff6ff" },
+  { v: "in_progress", l: "In Progress", c: "#ca8a04", bg: "#fefce8" },
+  { v: "on_hold", l: "On Hold", c: "#c2410c", bg: "#fff7ed" },
+  { v: "next_iteration", l: "Next Iteration", c: "#0891b2", bg: "#ecfeff" },
+];
+
+const VOL_TYPES: VolTypeOption[] = [
+  { v: "in_person", l: "In-Person", d: "On-site at charity location" },
+  { v: "remote", l: "Remote", d: "Work from anywhere online" },
+  { v: "hybrid", l: "Hybrid", d: "Mix of in-person and remote" },
+  { v: "event_based", l: "Event-Based", d: "Specific events or one-off days" },
+  { v: "skills_based", l: "Skills-Based", d: "Pro-bono professional services" },
+  { v: "mentoring", l: "Mentoring", d: "Ongoing mentorship or coaching" },
+];
+
+const CHAR_LIMIT = 500;
+const MIN_SKILLS = 3;
+let _id = 0;
+const uid = (p: string): string => `${p}_${++_id}_${Date.now()}`;
+
+// =============================================================================
+// SHARED UI COMPONENTS
+// =============================================================================
+
+interface SkillPickerProps {
+  selected: string[];
+  onChange: (skills: string[]) => void;
+  label: string;
+  sub?: string;
+  minRequired?: number;
+}
+
+const SkillPicker: React.FC<SkillPickerProps> = ({ selected, onChange, label, sub, minRequired }) => (
+  <div>
+    <label style={S.label}>{label}</label>
+    {sub && <div style={S.sub}>{sub}</div>}
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 }}>
+      {SKILLS.map((skill: string) => {
+        const k = skill.toLowerCase().replace(/ /g, "_").replace(/\//g, "_");
+        const on = selected.includes(k);
+        return (
+          <button key={skill} type="button"
+            onClick={() => onChange(on ? selected.filter((s: string) => s !== k) : [...selected, k])}
+            style={{
+              padding: "5px 13px", borderRadius: 20,
+              border: on ? "2px solid #0f2942" : "1.5px solid #d1d5db",
+              background: on ? "#0f2942" : "#fff", color: on ? "#fff" : "#4b5563",
+              fontSize: 12, fontFamily: "'Libre Franklin', sans-serif",
+              cursor: "pointer", transition: "all 0.15s", fontWeight: on ? 700 : 400,
+            }}>{skill}</button>
+        );
+      })}
+    </div>
+    <div style={{ marginTop: 6, fontSize: 11.5, display: "flex", justifyContent: "space-between" }}>
+      <span style={{ color: "#9ca3af" }}>{selected.length} selected</span>
+      {minRequired && selected.length < minRequired && (
+        <span style={{ color: "#dc2626", fontWeight: 600 }}>Minimum {minRequired} required</span>
+      )}
+    </div>
+  </div>
+);
+
+interface BadgeProps {
+  label: string;
+  color: string;
+  bg: string;
+}
+
+const Badge: React.FC<BadgeProps> = ({ label, color, bg }) => (
+  <span style={{
+    padding: "3px 10px", borderRadius: 6, fontSize: 10.5, fontWeight: 700,
+    textTransform: "uppercase", letterSpacing: "0.06em",
+    background: bg, color, fontFamily: "'Libre Franklin', sans-serif",
+  }}>{label}</span>
+);
+
+interface SkillTagProps {
+  skill: string;
+  highlight?: boolean;
+}
+
+const SkillTag: React.FC<SkillTagProps> = ({ skill, highlight = false }) => (
+  <span style={{
+    padding: "2px 9px", borderRadius: 12, fontSize: 11, fontWeight: 600,
+    background: highlight ? "#dcfce7" : "#f1f5f9",
+    color: highlight ? "#166534" : "#334155",
+    fontFamily: "'Libre Franklin', sans-serif",
+  }}>{skill.replace(/_/g, " ")}</span>
+);
+
+// =============================================================================
+// RESPONSE FORM (Separate Component)
+// =============================================================================
+
+interface ProjectResponseFormProps {
+  project: Project;
+  company: Company;
+  onSubmit: (response: CompanyResponse) => void;
+  onCancel: () => void;
+}
+
+const ProjectResponseForm: React.FC<ProjectResponseFormProps> = ({ project, company, onSubmit, onCancel }) => {
+  const [form, setForm] = useState<ResponseFormData>({
+    meetingDate: "",
+    meetingTime: "",
+    meetingNote: "",
+    peopleAvailable: 1,
+    availableFrom: "",
+    availableUntil: "",
+    description: "",
+  });
+
+  const vol = VOL_TYPES.find((v: VolTypeOption) => v.v === project.volunteeringType);
+  const overlap = getSkillOverlap(project.essentialSkills, company.offeredSkills);
+  const isValid: boolean = !!(form.meetingDate && form.meetingTime && form.peopleAvailable >= 1
+    && form.availableFrom && form.availableUntil && form.description.trim());
+
+  return (
+    <div style={{ ...S.card, padding: "32px 36px", animation: "slideIn 0.3s ease", border: "2px solid #16a34a20" }}>
+      <div style={{ marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid #f0f2f5" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#16a34a", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
+              Responding as {company.name}
+            </div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: 0 }}>{project.title}</h2>
+          </div>
+          <button onClick={onCancel} style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 18, padding: "2px 8px" }}>×</button>
+        </div>
+        <p style={{ fontSize: 13, color: "#4b5563", lineHeight: 1.6, margin: "8px 0 12px 0" }}>{project.description}</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+          {project.essentialSkills.map((s: string) => (
+            <SkillTag key={s} skill={s} highlight={overlap.matched.includes(s.toLowerCase())} />
+          ))}
+        </div>
+        <div style={{ fontSize: 11.5, color: "#9ca3af", fontWeight: 600, display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <span>{project.startDate} → {project.endDate}</span>
+          <span>{project.peopleNeeded} volunteer{project.peopleNeeded !== 1 ? "s" : ""}</span>
+          {vol && <span>{vol.l}</span>}
+        </div>
+        <div style={{ marginTop: 8, fontSize: 12, color: "#16a34a", fontWeight: 600 }}>
+          {overlap.count} of {overlap.total} skills matched
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <div style={{ padding: "20px 24px", borderRadius: 12, background: "linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%)", border: "1.5px solid #bbf7d0" }}>
+          <label style={{ ...S.label, fontSize: 14, color: "#166534", marginBottom: 10 }}>Request a Meeting</label>
+          <div style={S.sub}>Propose an initial meeting to discuss the project with the charity</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+            <div>
+              <div style={{ ...S.sub, marginBottom: 4, fontWeight: 600 }}>Preferred Date</div>
+              <input style={S.input} type="date" value={form.meetingDate} onChange={(e) => setForm({ ...form, meetingDate: e.target.value })} />
+            </div>
+            <div>
+              <div style={{ ...S.sub, marginBottom: 4, fontWeight: 600 }}>Preferred Time</div>
+              <input style={S.input} type="time" value={form.meetingTime} onChange={(e) => setForm({ ...form, meetingTime: e.target.value })} />
+            </div>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ ...S.sub, marginBottom: 4, fontWeight: 600 }}>Meeting Note (optional)</div>
+            <input style={S.input} value={form.meetingNote} onChange={(e) => setForm({ ...form, meetingNote: e.target.value })} placeholder="e.g. Happy to do a video call or meet at your offices" />
+          </div>
+        </div>
+
+        <div>
+          <label style={S.label}>Your Availability</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 6 }}>
+            <div>
+              <div style={{ ...S.sub, marginBottom: 4, fontWeight: 600 }}>People Available</div>
+              <input style={S.input} type="number" min={1} max={100} value={form.peopleAvailable} onChange={(e) => setForm({ ...form, peopleAvailable: Math.max(1, parseInt(e.target.value) || 1) })} />
+            </div>
+            <div>
+              <div style={{ ...S.sub, marginBottom: 4, fontWeight: 600 }}>Available From</div>
+              <input style={S.input} type="date" value={form.availableFrom} onChange={(e) => setForm({ ...form, availableFrom: e.target.value })} />
+            </div>
+            <div>
+              <div style={{ ...S.sub, marginBottom: 4, fontWeight: 600 }}>Available Until</div>
+              <input style={S.input} type="date" value={form.availableUntil} onChange={(e) => setForm({ ...form, availableUntil: e.target.value })} />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label style={S.label}>What We Can Offer</label>
+          <div style={S.sub}>Describe how your team can support this project</div>
+          <textarea style={{ ...S.input, minHeight: 100, resize: "vertical" as const, marginTop: 6 }} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="e.g. Our team of 5 developers can build the website using React and Node.js..." />
+        </div>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={() => { if (isValid) onSubmit({ ...form, companyId: company.id, projectId: project.id, submittedAt: new Date().toISOString() }); }}
+            disabled={!isValid}
+            style={{ flex: 1, padding: "13px 24px", borderRadius: 10, border: "none", background: "#16a34a", color: "#fff", fontSize: 14, fontWeight: 700, fontFamily: "'Libre Franklin', sans-serif", cursor: isValid ? "pointer" : "not-allowed", opacity: isValid ? 1 : 0.4, transition: "all 0.15s" }}>
+            Submit Response & Request Meeting
+          </button>
+          <button onClick={onCancel} style={{ padding: "13px 24px", borderRadius: 10, border: "1.5px solid #d1d5db", background: "#fff", color: "#6b7280", fontSize: 14, fontWeight: 600, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =============================================================================
+// MAIN APP
+// =============================================================================
+
+export default function CSIPlatform(): React.ReactElement {
+  const [role, setRole] = useState<Role | null>(null);
+  const [page, setPage] = useState<Page>("dashboard");
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [responses, setResponses] = useState<CompanyResponse[]>([]);
+  const [selectedMatches, setSelectedMatches] = useState<Record<string, string>>({});
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const [respondingTo, setRespondingTo] = useState<RespondingTo | null>(null);
+
+  const emptyProj: ProjectFormState = {
+    title: "", description: "", status: "planning",
+    essentialSkills: [], startDate: "", endDate: "",
+    peopleNeeded: 1, volunteeringType: "", additionalInfo: "",
+  };
+  const [projForm, setProjForm] = useState<ProjectFormState>(emptyProj);
+
+  const emptyComp: CompanyFormState = { name: "", bio: "", offeredSkills: [] };
+  const [compForm, setCompForm] = useState<CompanyFormState>(emptyComp);
+
+  const projValid: boolean = !!(projForm.title.trim() && projForm.description.trim()
+    && projForm.essentialSkills.length >= MIN_SKILLS
+    && projForm.startDate && projForm.endDate && projForm.volunteeringType);
+
+  const createProject = useCallback((): void => {
+    if (!projValid) return;
+    const proj: Project = { id: uid("proj"), charityId: "charity_user", ...projForm, volunteeringType: projForm.volunteeringType as VolunteeringType, projectStatus: "open" };
+    setProjects((p: Project[]) => [proj, ...p]);
+    setProjForm(emptyProj);
+    setPage("dashboard");
+  }, [projForm, projValid]);
+
+  const createCompany = useCallback((): void => {
+    if (!compForm.name.trim() || compForm.offeredSkills.length === 0) return;
+    const comp: Company = { id: uid("comp"), ...compForm, status: "available", preferredProjectIds: [] };
+    setCompanies((p: Company[]) => [...p, comp]);
+    setCompForm(emptyComp);
+    setPage("dashboard");
+  }, [compForm]);
+
+  const submitResponse = useCallback((response: CompanyResponse): void => {
+    setResponses((p: CompanyResponse[]) => [...p, response]);
+    setCompanies((p: Company[]) => p.map((c: Company) => c.id === response.companyId
+      ? { ...c, preferredProjectIds: [...new Set([...c.preferredProjectIds, response.projectId])] }
+      : c));
+    setRespondingTo(null);
+  }, []);
+
+  const selectMatch = useCallback((projId: string, compId: string): void => {
+    setSelectedMatches((p: Record<string, string>) => ({ ...p, [projId]: compId }));
+    const proj = projects.find((p: Project) => p.id === projId);
+    setNotifications((p: Notification[]) => [...p, { companyId: compId, projectTitle: proj?.title || "" }]);
+    setProjects((p: Project[]) => p.map((pr: Project) => pr.id === projId ? { ...pr, projectStatus: "matched" as ProjectLifecycle } : pr));
+  }, [projects]);
+
+  const compNotifs = useMemo((): Record<string, string[]> => {
+    const m: Record<string, string[]> = {};
+    notifications.forEach((n: Notification) => { if (!m[n.companyId]) m[n.companyId] = []; m[n.companyId].push(n.projectTitle); });
+    return m;
+  }, [notifications]);
+
+  const openProjects: Project[] = projects.filter((p: Project) => p.projectStatus === "open");
+
+  // =========================================================================
+  // ROLE SELECTION
+  // =========================================================================
+  if (!role) {
+    return (
+      <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700;800&family=Lora:wght@600;700&family=IBM+Plex+Mono:wght@500;700&display=swap" rel="stylesheet" />
+        <style>{`@keyframes rise{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}`}</style>
+        <div style={{ textAlign: "center", maxWidth: 520, animation: "rise 0.5s ease" }}>
+          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.2em", color: "#6b7280", textTransform: "uppercase", marginBottom: 16, fontFamily: "'Libre Franklin', sans-serif" }}>CSI Matching Platform</div>
+          <h1 style={{ fontSize: 42, fontWeight: 700, color: "#0f2942", fontFamily: "'Lora', serif", margin: "0 0 8px 0", lineHeight: 1.1 }}>Connect. Match. Impact.</h1>
+          <p style={{ color: "#6b7280", fontSize: 15, marginBottom: 36, fontFamily: "'Libre Franklin', sans-serif", lineHeight: 1.6 }}>Bridging charities and companies for meaningful social investment partnerships.</p>
+          <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
+            {([
+              { r: "charity" as Role, title: "I'm a Charity", desc: "Create project proposals and find company partners", accent: "#0f2942" },
+              { r: "company" as Role, title: "I'm a Company", desc: "Register skills and browse projects to support", accent: "#16a34a" },
+            ]).map(({ r, title, desc, accent }) => (
+              <button key={r} onClick={() => { setRole(r); setPage("dashboard"); }}
+                style={{ flex: 1, padding: "32px 24px", borderRadius: 16, border: `2px solid ${accent}20`, background: "#fff", cursor: "pointer", transition: "all 0.2s", textAlign: "left" as const, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = accent; (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)"; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.borderColor = `${accent}20`; (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)"; }}
+              >
+                <div style={{ fontSize: 18, fontWeight: 700, color: accent, fontFamily: "'Lora', serif", marginBottom: 6 }}>{title}</div>
+                <div style={{ fontSize: 13, color: "#6b7280", fontFamily: "'Libre Franklin', sans-serif", lineHeight: 1.5 }}>{desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const isCharity: boolean = role === "charity";
+  const accent: string = isCharity ? "#0f2942" : "#16a34a";
+  const hasResponses: boolean = responses.length > 0;
+
+  const navItems: NavItem[] = isCharity
+    ? [
+        { k: "dashboard", l: "Dashboard" },
+        { k: "new_project", l: "New Project" },
+        ...(hasResponses ? [{ k: "review" as Page, l: `Review Responses (${responses.length})`, special: true }] : []),
+      ]
+    : [
+        { k: "dashboard", l: "Dashboard" },
+        { k: "register", l: "Register Company" },
+        { k: "browse", l: "Browse Projects" },
+      ];
+
+  // =========================================================================
+  return (
+    <div style={S.page}>
+      <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700;800&family=Lora:wght@600;700&family=IBM+Plex+Mono:wght@500;700&display=swap" rel="stylesheet" />
+      <style>{`
+        @keyframes slideIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+        textarea:focus,input:focus,select:focus{border-color:${accent}!important;box-shadow:0 0 0 3px ${accent}12!important}
+      `}</style>
+
+      <div style={S.container}>
+        {/* HEADER */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
+          <div>
+            <span style={{ padding: "3px 10px", borderRadius: 5, background: accent, color: "#fff", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" as const, fontFamily: "'Libre Franklin', sans-serif" }}>
+              {isCharity ? "Charity" : "Company"}
+            </span>
+            <h1 style={{ fontSize: 30, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: "6px 0 0 0", lineHeight: 1.15 }}>
+              {isCharity ? "Project Hub" : "Partnership Hub"}
+            </h1>
+          </div>
+          <button onClick={() => { setRole(null); setPage("dashboard"); setRespondingTo(null); }}
+            style={{ padding: "7px 16px", borderRadius: 8, border: "1.5px solid #d1d5db", background: "#fff", color: "#6b7280", fontSize: 12, fontWeight: 600, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>
+            Switch Role
+          </button>
+        </div>
+
+        {/* NAV */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 28, flexWrap: "wrap" }}>
+          {navItems.map((n: NavItem) => (
+            <button key={n.k} onClick={() => { setPage(n.k as Page); setRespondingTo(null); }}
+              style={{
+                padding: "8px 18px", borderRadius: 8, fontSize: 12.5, fontWeight: 600,
+                fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer", transition: "all 0.15s",
+                border: n.special ? "none" : page === n.k ? `2px solid ${accent}` : "1.5px solid #d1d5db",
+                background: n.special ? "#16a34a" : page === n.k ? `${accent}0d` : "#fff",
+                color: n.special ? "#fff" : page === n.k ? accent : "#6b7280",
+              }}>{n.l}</button>
+          ))}
+        </div>
+
+        {/* CHARITY DASHBOARD */}
+        {isCharity && page === "dashboard" && (
+          <div style={{ animation: "fadeUp 0.3s ease" }}>
+            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+              {[
+                { l: "Projects", n: projects.length, c: "#0f2942" },
+                { l: "Open", n: openProjects.length, c: "#2563eb" },
+                { l: "Responses", n: responses.length, c: "#7c3aed" },
+                { l: "Matched", n: projects.filter((p: Project) => p.projectStatus === "matched").length, c: "#16a34a" },
+              ].map((s) => (
+                <div key={s.l} style={{ ...S.card, flex: "1 1 0", textAlign: "center" as const, padding: "16px 12px", minWidth: 85 }}>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: s.c, fontFamily: "'IBM Plex Mono', monospace" }}>{s.n}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", fontWeight: 600 }}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+
+            {Object.keys(selectedMatches).length > 0 && (
+              <div style={{ ...S.card, border: "2px solid #16a34a", background: "#f0fdf4", marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#166534", marginBottom: 8 }}>Confirmed Matches</div>
+                {Object.entries(selectedMatches).map(([projId, compId]: [string, string]) => {
+                  const proj = projects.find((p: Project) => p.id === projId);
+                  const comp = companies.find((c: Company) => c.id === compId);
+                  return (
+                    <div key={projId} style={{ padding: "8px 0", borderBottom: "1px solid #bbf7d0", fontSize: 13, color: "#1e3a2f" }}>
+                      <strong>{proj?.title}</strong> matched with <strong>{comp?.name}</strong>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {projects.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {projects.map((p: Project) => {
+                  const st = STATUSES.find((s: StatusOption) => s.v === p.status);
+                  const vol = VOL_TYPES.find((v: VolTypeOption) => v.v === p.volunteeringType);
+                  const projResponses = responses.filter((r: CompanyResponse) => r.projectId === p.id);
+                  return (
+                    <div key={p.id} style={S.card}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: 0 }}>{p.title}</h3>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                          {st && <Badge label={st.l} color={st.c} bg={st.bg} />}
+                          <Badge label={p.projectStatus} color={p.projectStatus === "matched" ? "#16a34a" : "#2563eb"} bg={p.projectStatus === "matched" ? "#f0fdf4" : "#eff6ff"} />
+                        </div>
+                      </div>
+                      <p style={{ fontSize: 13, color: "#4b5563", lineHeight: 1.6, margin: "0 0 12px 0" }}>{p.description}</p>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+                        {p.essentialSkills.map((s: string) => <SkillTag key={s} skill={s} />)}
+                      </div>
+                      <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: "#9ca3af", fontWeight: 600, flexWrap: "wrap" }}>
+                        <span>{p.startDate} → {p.endDate}</span>
+                        <span>{p.peopleNeeded} volunteer{p.peopleNeeded !== 1 ? "s" : ""}</span>
+                        {vol && <span>{vol.l}</span>}
+                        {projResponses.length > 0 && <span style={{ color: "#7c3aed" }}>{projResponses.length} response{projResponses.length !== 1 ? "s" : ""}</span>}
+                      </div>
+                      {p.additionalInfo && (
+                        <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 8, background: "#f9fafb", fontSize: 12.5, color: "#4b5563", lineHeight: 1.5, borderLeft: "3px solid #e5e7eb" }}>{p.additionalInfo}</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ ...S.card, textAlign: "center" as const, padding: 48, color: "#9ca3af" }}>
+                <div style={{ fontSize: 15 }}>No projects yet. Create your first proposal.</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* CHARITY: NEW PROJECT */}
+        {isCharity && page === "new_project" && (
+          <div style={{ ...S.card, padding: "32px 36px", animation: "slideIn 0.3s ease" }}>
+            <h2 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: "0 0 24px 0" }}>New Project Proposal</h2>
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div>
+                <label style={S.label}>Project Title</label>
+                <input style={S.input} value={projForm.title} onChange={(e) => setProjForm({ ...projForm, title: e.target.value })} placeholder="e.g. Community Digital Literacy Programme" maxLength={120} />
+              </div>
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <label style={S.label}>Project Description</label>
+                  <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: projForm.description.length > CHAR_LIMIT * 0.85 ? (projForm.description.length >= CHAR_LIMIT ? "#dc2626" : "#ca8a04") : "#9ca3af" }}>{projForm.description.length}/{CHAR_LIMIT}</span>
+                </div>
+                <textarea style={{ ...S.input, minHeight: 100, resize: "vertical" as const }} value={projForm.description} onChange={(e) => { if (e.target.value.length <= CHAR_LIMIT) setProjForm({ ...projForm, description: e.target.value }); }} placeholder="Describe your project goals, what support you need, and expected outcomes..." maxLength={CHAR_LIMIT} />
+                <div style={{ height: 3, borderRadius: 2, background: "#e5e7eb", marginTop: 5, overflow: "hidden" }}>
+                  <div style={{ height: "100%", borderRadius: 2, width: `${Math.min((projForm.description.length / CHAR_LIMIT) * 100, 100)}%`, background: projForm.description.length > CHAR_LIMIT * 0.85 ? "#dc2626" : "#0f2942", transition: "all 0.2s" }} />
+                </div>
+              </div>
+              <div>
+                <label style={S.label}>Project Status</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 6 }}>
+                  {STATUSES.map((s: StatusOption) => (
+                    <button key={s.v} type="button" onClick={() => setProjForm({ ...projForm, status: s.v })}
+                      style={{ padding: "7px 16px", borderRadius: 8, border: projForm.status === s.v ? `2px solid ${s.c}` : "1.5px solid #e5e7eb", background: projForm.status === s.v ? s.bg : "#fff", color: projForm.status === s.v ? s.c : "#9ca3af", fontSize: 12.5, fontWeight: projForm.status === s.v ? 700 : 500, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer", transition: "all 0.15s" }}>{s.l}</button>
+                  ))}
+                </div>
+              </div>
+              <SkillPicker label="Essential Skills" sub="Select the skills needed for this project (minimum 3)" selected={projForm.essentialSkills} onChange={(s: string[]) => setProjForm({ ...projForm, essentialSkills: s })} minRequired={MIN_SKILLS} />
+              <div>
+                <label style={S.label}>Estimated Support Required</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 6 }}>
+                  <div><div style={{ ...S.sub, marginBottom: 4 }}>Start Date</div><input style={S.input} type="date" value={projForm.startDate} onChange={(e) => setProjForm({ ...projForm, startDate: e.target.value })} /></div>
+                  <div><div style={{ ...S.sub, marginBottom: 4 }}>End Date</div><input style={S.input} type="date" value={projForm.endDate} onChange={(e) => setProjForm({ ...projForm, endDate: e.target.value })} /></div>
+                  <div><div style={{ ...S.sub, marginBottom: 4 }}>People Needed</div><input style={S.input} type="number" min={1} max={100} value={projForm.peopleNeeded} onChange={(e) => setProjForm({ ...projForm, peopleNeeded: Math.max(1, parseInt(e.target.value) || 1) })} /></div>
+                </div>
+              </div>
+              <div>
+                <label style={S.label}>Type of Volunteering</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 7 }}>
+                  {VOL_TYPES.map((v: VolTypeOption) => (
+                    <button key={v.v} type="button" onClick={() => setProjForm({ ...projForm, volunteeringType: v.v })}
+                      style={{ padding: "12px 14px", borderRadius: 10, textAlign: "left" as const, border: projForm.volunteeringType === v.v ? "2px solid #0f2942" : "1.5px solid #e5e7eb", background: projForm.volunteeringType === v.v ? "#f0f4f8" : "#fff", cursor: "pointer", transition: "all 0.15s" }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: projForm.volunteeringType === v.v ? "#0f2942" : "#374151", fontFamily: "'Libre Franklin', sans-serif" }}>{v.l}</div>
+                      <div style={{ fontSize: 11, color: "#9ca3af", fontFamily: "'Libre Franklin', sans-serif", marginTop: 2 }}>{v.d}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label style={S.label}>Additional Information</label>
+                <div style={S.sub}>Any other details, requirements, or context you'd like companies to know about</div>
+                <textarea style={{ ...S.input, minHeight: 90, resize: "vertical" as const, marginTop: 6 }} value={projForm.additionalInfo} onChange={(e) => setProjForm({ ...projForm, additionalInfo: e.target.value })} placeholder="e.g. We'd prefer a team with prior experience working with vulnerable communities..." />
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                <button onClick={createProject} disabled={!projValid} style={{ flex: 1, padding: "12px 24px", borderRadius: 10, border: "none", background: "#0f2942", color: "#fff", fontSize: 14, fontWeight: 700, fontFamily: "'Libre Franklin', sans-serif", cursor: projValid ? "pointer" : "not-allowed", opacity: projValid ? 1 : 0.4 }}>Create Project</button>
+                <button onClick={() => { setProjForm(emptyProj); setPage("dashboard"); }} style={{ padding: "12px 24px", borderRadius: 10, border: "1.5px solid #d1d5db", background: "#fff", color: "#6b7280", fontSize: 14, fontWeight: 600, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CHARITY: REVIEW RESPONSES */}
+        {isCharity && page === "review" && (
+          <div style={{ animation: "fadeUp 0.3s ease" }}>
+            <div style={{ textAlign: "center" as const, marginBottom: 24 }}>
+              <h2 style={{ fontSize: 24, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: 0 }}>Company Responses</h2>
+              <p style={{ color: "#9ca3af", fontSize: 13, marginTop: 4 }}>Review responses from interested companies and select your match.</p>
+            </div>
+            {projects.filter((p: Project) => responses.some((r: CompanyResponse) => r.projectId === p.id)).map((proj: Project) => {
+              const ranked = rankResponses(proj, responses, companies);
+              return (
+                <div key={proj.id} style={{ ...S.card, marginBottom: 16 }}>
+                  <h3 style={{ fontSize: 17, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: "0 0 4px 0" }}>{proj.title}</h3>
+                  <div style={{ fontSize: 11.5, color: "#9ca3af", marginBottom: 16 }}>{ranked.length} response{ranked.length !== 1 ? "s" : ""} · {proj.essentialSkills.map((s: string) => s.replace(/_/g, " ")).join(", ")}</div>
+                  {ranked.map((r: RankedResponse, i: number) => {
+                    const chosen = selectedMatches[proj.id] === r.companyId;
+                    const locked = !!selectedMatches[proj.id];
+                    return (
+                      <div key={r.companyId} style={{ padding: "18px 20px", marginBottom: 10, borderRadius: 12, border: chosen ? "2px solid #16a34a" : "1.5px solid #e5e7eb", background: chosen ? "#f0fdf4" : "#fafbfc" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ width: 24, height: 24, borderRadius: "50%", background: i === 0 ? "#0f2942" : i === 1 ? "#374151" : "#9ca3af", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, fontFamily: "'IBM Plex Mono', monospace" }}>{i + 1}</span>
+                            <span style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>{r.companyName}</span>
+                          </div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#16a34a", fontFamily: "'IBM Plex Mono', monospace" }}>{r.overlap.count}/{r.overlap.total} skills</div>
+                        </div>
+                        {r.companyBio && <div style={{ fontSize: 12.5, color: "#6b7280", marginBottom: 10, marginLeft: 32, fontStyle: "italic" }}>{r.companyBio}</div>}
+                        <div style={{ marginLeft: 32, padding: "10px 14px", borderRadius: 8, background: "#ecfeff", border: "1px solid #a5f3fc", marginBottom: 10 }}>
+                          <div style={{ fontSize: 11.5, fontWeight: 700, color: "#0891b2", marginBottom: 4 }}>Meeting Requested</div>
+                          <div style={{ fontSize: 12.5, color: "#374151" }}>{r.meetingDate} at {r.meetingTime}{r.meetingNote && <span style={{ color: "#6b7280" }}> — {r.meetingNote}</span>}</div>
+                        </div>
+                        <div style={{ marginLeft: 32, display: "flex", gap: 14, fontSize: 11.5, color: "#9ca3af", fontWeight: 600, marginBottom: 10, flexWrap: "wrap" }}>
+                          <span>{r.peopleAvailable} people available</span>
+                          <span>{r.availableFrom} → {r.availableUntil}</span>
+                        </div>
+                        <div style={{ marginLeft: 32, padding: "10px 12px", borderRadius: 8, background: "#f9fafb", fontSize: 12.5, color: "#4b5563", lineHeight: 1.5, borderLeft: "3px solid #e5e7eb" }}>{r.description}</div>
+                        <div style={{ marginLeft: 32, marginTop: 10, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                          {proj.essentialSkills.map((s: string) => <SkillTag key={s} skill={s} highlight={r.overlap.matched.includes(s.toLowerCase())} />)}
+                        </div>
+                        <div style={{ marginTop: 14, marginLeft: 32 }}>
+                          {!locked && <button onClick={() => selectMatch(proj.id, r.companyId)} style={{ width: "100%", padding: "10px", borderRadius: 8, border: "none", background: "#16a34a", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>Select {r.companyName}</button>}
+                          {chosen && <div style={{ textAlign: "center" as const, padding: "8px 0", fontWeight: 700, color: "#166534", fontSize: 13 }}>Matched</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+            {!projects.some((p: Project) => responses.some((r: CompanyResponse) => r.projectId === p.id)) && (
+              <div style={{ ...S.card, textAlign: "center" as const, padding: 48, color: "#9ca3af" }}><div style={{ fontSize: 15 }}>No responses yet.</div></div>
+            )}
+            <div style={{ textAlign: "center" as const, marginTop: 12 }}>
+              <button onClick={() => setPage("dashboard")} style={{ padding: "10px 24px", borderRadius: 8, border: "1.5px solid #d1d5db", background: "#fff", color: "#6b7280", fontSize: 13, fontWeight: 600, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>Back to Dashboard</button>
+            </div>
+          </div>
+        )}
+
+        {/* COMPANY DASHBOARD */}
+        {!isCharity && page === "dashboard" && (
+          <div style={{ animation: "fadeUp 0.3s ease" }}>
+            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+              {[
+                { l: "Your Companies", n: companies.length, c: "#16a34a" },
+                { l: "Matched Projects", n: openProjects.length, c: "#2563eb" },
+                { l: "Responses Sent", n: responses.length, c: "#7c3aed" },
+              ].map((s) => (
+                <div key={s.l} style={{ ...S.card, flex: "1 1 0", textAlign: "center" as const, padding: "16px 12px", minWidth: 100 }}>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: s.c, fontFamily: "'IBM Plex Mono', monospace" }}>{s.n}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", fontWeight: 600 }}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+            {Object.keys(compNotifs).length > 0 && (
+              <div style={{ ...S.card, border: "2px solid #16a34a", background: "#f0fdf4", marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#166534", marginBottom: 8 }}>You've Been Matched!</div>
+                {Object.entries(compNotifs).map(([cid, titles]: [string, string[]]) => {
+                  const comp = companies.find((c: Company) => c.id === cid);
+                  return titles.map((t: string, i: number) => (
+                    <div key={`${cid}-${i}`} style={{ padding: "8px 0", borderBottom: "1px solid #bbf7d0", fontSize: 13, color: "#1e3a2f" }}>
+                      <strong>{comp?.name}</strong> has been selected for <strong>"{t}"</strong>
+                    </div>
+                  ));
+                })}
+              </div>
+            )}
+            {companies.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {companies.map((c: Company) => (
+                  <div key={c.id} style={S.card}>
+                    <div style={{ fontWeight: 700, fontSize: 16, color: "#0f172a", fontFamily: "'Lora', serif" }}>{c.name}</div>
+                    {c.bio && <p style={{ fontSize: 13, color: "#4b5563", lineHeight: 1.5, margin: "6px 0 10px 0" }}>{c.bio}</p>}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: c.bio ? 0 : 8, marginBottom: 8 }}>
+                      {c.offeredSkills.map((s: string) => <span key={s} style={{ padding: "2px 9px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: "#f0fdf4", color: "#166534" }}>{s.replace(/_/g, " ")}</span>)}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#9ca3af", fontWeight: 600 }}>
+                      {c.offeredSkills.length} skill{c.offeredSkills.length !== 1 ? "s" : ""} offered
+                      {c.preferredProjectIds.length > 0 && <span style={{ color: "#16a34a" }}> · Responded to {c.preferredProjectIds.length} project{c.preferredProjectIds.length !== 1 ? "s" : ""}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ ...S.card, textAlign: "center" as const, padding: 48, color: "#9ca3af" }}><div style={{ fontSize: 15 }}>No companies registered yet.</div></div>
+            )}
+          </div>
+        )}
+
+        {/* COMPANY: REGISTER */}
+        {!isCharity && page === "register" && (
+          <div style={{ ...S.card, padding: "32px 36px", animation: "slideIn 0.3s ease" }}>
+            <h2 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: "0 0 24px 0" }}>Register Company</h2>
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div><label style={S.label}>Company Name</label><input style={S.input} value={compForm.name} onChange={(e) => setCompForm({ ...compForm, name: e.target.value })} placeholder="e.g. TechForGood Ltd" /></div>
+              <div>
+                <label style={S.label}>Company Bio</label>
+                <div style={S.sub}>Tell charities a bit about your company and what drives you</div>
+                <textarea style={{ ...S.input, minHeight: 90, resize: "vertical" as const, marginTop: 6 }} value={compForm.bio} onChange={(e) => setCompForm({ ...compForm, bio: e.target.value })} placeholder="e.g. We're a London-based tech consultancy passionate about using technology for social good..." />
+              </div>
+              <SkillPicker label="Skills You Can Offer" sub="Select all skills your team can provide" selected={compForm.offeredSkills} onChange={(s: string[]) => setCompForm({ ...compForm, offeredSkills: s })} />
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={createCompany} disabled={!compForm.name.trim() || compForm.offeredSkills.length === 0}
+                  style={{ flex: 1, padding: "12px 24px", borderRadius: 10, border: "none", background: "#16a34a", color: "#fff", fontSize: 14, fontWeight: 700, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer", opacity: (!compForm.name.trim() || compForm.offeredSkills.length === 0) ? 0.4 : 1 }}>Register</button>
+                <button onClick={() => { setCompForm(emptyComp); setPage("dashboard"); }} style={{ padding: "12px 24px", borderRadius: 10, border: "1.5px solid #d1d5db", background: "#fff", color: "#6b7280", fontSize: 14, fontWeight: 600, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* COMPANY: BROWSE + RESPONSE FORM */}
+        {!isCharity && page === "browse" && (
+          <div style={{ animation: "fadeUp 0.3s ease" }}>
+            {companies.length === 0 ? (
+              <div style={{ ...S.card, textAlign: "center" as const, padding: 40, color: "#9ca3af" }}>Register a company first to browse projects.</div>
+            ) : respondingTo ? (() => {
+              const proj = projects.find((p: Project) => p.id === respondingTo.projectId);
+              const comp = companies.find((c: Company) => c.id === respondingTo.companyId);
+              if (!proj || !comp) return null;
+              return <ProjectResponseForm project={proj} company={comp} onSubmit={submitResponse} onCancel={() => setRespondingTo(null)} />;
+            })() : (
+              companies.map((comp: Company) => {
+                const matched = getMatchedProjects(projects, comp);
+                const alreadyResponded = new Set(responses.filter((r: CompanyResponse) => r.companyId === comp.id).map((r: CompanyResponse) => r.projectId));
+                return (
+                  <div key={comp.id} style={{ ...S.card, marginBottom: 16 }}>
+                    <h3 style={{ fontSize: 17, fontWeight: 700, color: "#0f172a", fontFamily: "'Lora', serif", margin: "0 0 4px 0" }}>{comp.name}</h3>
+                    <p style={{ fontSize: 12.5, color: "#9ca3af", marginBottom: 14 }}>Projects matching your skills ({matched.length} found)</p>
+                    {matched.length === 0 ? (
+                      <div style={{ color: "#9ca3af", fontSize: 13, padding: "12px 0" }}>No projects match your current skills yet.</div>
+                    ) : (
+                      matched.map((proj: ProjectWithOverlap) => {
+                        const responded = alreadyResponded.has(proj.id);
+                        const vol = VOL_TYPES.find((v: VolTypeOption) => v.v === proj.volunteeringType);
+                        return (
+                          <div key={proj.id} style={{ padding: "16px 18px", marginBottom: 8, borderRadius: 10, border: responded ? "1.5px solid #bbf7d0" : "1.5px solid #e5e7eb", background: responded ? "#f0fdf4" : "#fff", transition: "all 0.15s" }}>
+                            <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a", marginBottom: 4 }}>{proj.title}</div>
+                            <p style={{ fontSize: 12.5, color: "#6b7280", lineHeight: 1.5, margin: "0 0 8px 0" }}>{proj.description}</p>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+                              {proj.essentialSkills.map((s: string) => <SkillTag key={s} skill={s} highlight={proj.overlap.matched.includes(s.toLowerCase())} />)}
+                            </div>
+                            <div style={{ fontSize: 11.5, color: "#9ca3af", fontWeight: 600, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                              <span>{proj.startDate} → {proj.endDate}</span>
+                              <span>{proj.peopleNeeded} people</span>
+                              {vol && <span>{vol.l}</span>}
+                              <span style={{ color: "#16a34a" }}>{proj.overlap.count}/{proj.overlap.total} skills matched</span>
+                            </div>
+                            <div style={{ marginTop: 12 }}>
+                              {responded ? (
+                                <div style={{ fontSize: 12.5, fontWeight: 700, color: "#166534", textAlign: "center" as const, padding: "6px 0" }}>Response Submitted</div>
+                              ) : (
+                                <button onClick={() => setRespondingTo({ projectId: proj.id, companyId: comp.id })}
+                                  style={{ width: "100%", padding: "10px", borderRadius: 8, border: "none", background: "#16a34a", color: "#fff", fontSize: 13, fontWeight: 700, fontFamily: "'Libre Franklin', sans-serif", cursor: "pointer" }}>Respond to Project</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// STYLES
+// =============================================================================
+
+interface Styles {
+  page: CSSProperties;
+  container: CSSProperties;
+  card: CSSProperties;
+  label: CSSProperties;
+  sub: CSSProperties;
+  input: CSSProperties;
+}
+
+const S: Styles = {
+  page: {
+    minHeight: "100vh",
+    background: "linear-gradient(175deg, #f8f9fb 0%, #eef0f5 50%, #e7eaf2 100%)",
+    fontFamily: "'Libre Franklin', sans-serif",
+    padding: "0 16px",
+  },
+  container: { maxWidth: 780, margin: "0 auto", paddingTop: 40, paddingBottom: 60 },
+  card: {
+    background: "#fff", borderRadius: 14, padding: "22px 26px",
+    border: "1px solid #eef0f4",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.03), 0 3px 10px rgba(0,0,0,0.02)",
+  },
+  label: {
+    display: "block" as const, marginBottom: 5, fontWeight: 700, fontSize: 12.5,
+    letterSpacing: "0.03em", color: "#374151", fontFamily: "'Libre Franklin', sans-serif",
+  },
+  sub: { fontSize: 11.5, color: "#9ca3af", fontWeight: 500 },
+  input: {
+    width: "100%", padding: "10px 13px", borderRadius: 9,
+    border: "1.5px solid #e5e7eb", fontSize: 13.5,
+    fontFamily: "'Libre Franklin', sans-serif", color: "#1f2937",
+    background: "#fafbfc", outline: "none", boxSizing: "border-box" as const,
+    transition: "border-color 0.15s, box-shadow 0.15s",
+  },
+};
