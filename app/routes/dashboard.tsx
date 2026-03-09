@@ -75,6 +75,7 @@ interface ResponseFormData {
 }
 
 interface CompanyResponse extends ResponseFormData {
+  id?: string;
   companyId: string;
   projectId: string;
   submittedAt: string;
@@ -582,6 +583,15 @@ export default function Dashboard() {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "responses"), (snap) => {
+      setResponses(
+        snap.docs.map((d) => ({ id: d.id, ...d.data() } as CompanyResponse)),
+      );
+    });
+    return unsub;
+  }, []);
+
   const projValid =
     !!(projForm.title.trim() && projForm.description.trim()
       && projForm.essentialSkills.length >= MIN_SKILLS
@@ -610,17 +620,26 @@ export default function Dashboard() {
     setPage("dashboard");
   }, [compForm]);
 
-  const submitResponse = useCallback((response: CompanyResponse) => {
-    setResponses((p) => [...p, response]);
-    setCompanies((p) =>
-      p.map((c) =>
-        c.id === response.companyId
-          ? { ...c, preferredProjectIds: [...new Set([...c.preferredProjectIds, response.projectId])] }
-          : c,
-      ),
-    );
-    setRespondingTo(null);
-  }, []);
+  const submitResponse = useCallback(
+    async (response: CompanyResponse) => {
+      // Save response document
+      await addDoc(collection(db, "responses"), response);
+
+      // Update the company's preferredProjectIds in Firestore
+      const company = companies.find((c) => c.id === response.companyId);
+      if (company) {
+        const updated = [
+          ...new Set([...company.preferredProjectIds, response.projectId]),
+        ];
+        await updateDoc(doc(db, "companies", response.companyId), {
+          preferredProjectIds: updated,
+        });
+      }
+
+      setRespondingTo(null);
+    },
+    [companies],
+  );
 
   const selectMatch = useCallback(
     async (projId: string, compId: string) => {
@@ -679,29 +698,17 @@ export default function Dashboard() {
 
   if (!role) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-100 dark:from-gray-900 dark:to-gray-800 flex flex-col items-center justify-center px-4 py-16">
+      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-100 dark:from-gray-900 dark:to-gray-800 flex flex-col items-center justify-center px-4 pb-16">
         <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-emerald-500 mb-6 shadow-lg">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-8 h-8 text-white"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
-              />
-            </svg>
+          <div className="w-100 h-100 rounded-full overflow-hidden mx-auto">
+            <img
+              src="/Connect 4 Good Logo transparent.png"
+              alt="Connect 4 Good"
+              className="w-full h-full object-cover scale-150"
+            />
           </div>
-          <h1 className="text-5xl font-bold text-gray-800 dark:text-white tracking-tight mb-3">
-            Connect 4 Good
-          </h1>
           <p className="text-xl font-semibold text-emerald-600 dark:text-emerald-400 mb-3">
-            Your workforce. Their mission. Where skills meet purpose.
+            Your workforce. Their mission.
           </p>
           <p className="text-base text-gray-600 dark:text-gray-300 max-w-lg mx-auto leading-relaxed">
             We bridge the gap between companies with willing hands and charities
@@ -776,16 +783,6 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
-
-        <p className="mt-10 text-sm text-gray-500 dark:text-gray-400">
-          Already have an account?{" "}
-          <a
-            href="#"
-            className="text-emerald-600 dark:text-emerald-400 hover:underline font-medium"
-          >
-            Sign in
-          </a>
-        </p>
       </div>
     );
   }
@@ -824,10 +821,12 @@ export default function Dashboard() {
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Link to="/" className="flex items-center gap-2 group">
-              <div className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center">
-                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-                </svg>
+              <div className="w-7 h-7 rounded-full overflow-hidden">
+                <img
+                  src="/Connect 4 Good Logo.png"
+                  alt="Connect 4 Good"
+                  className="w-full h-full object-cover scale-150"
+                />
               </div>
               <span className="text-sm font-bold text-gray-700 group-hover:text-gray-900 transition-colors hidden sm:inline">
                 Connect 4 Good
