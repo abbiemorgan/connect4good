@@ -103,9 +103,12 @@ export default function Home() {
             Register your company and find meaningful charities where your team
             can spend their CSRF volunteering days making a real difference.
           </p>
-          <button className="mt-auto w-full py-3 px-6 rounded-xl bg-teal-500 hover:bg-teal-600 active:bg-teal-700 text-white font-semibold text-base shadow-md hover:shadow-lg transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-teal-300">
+          <Link
+            to="/dashboard"
+            className="mt-auto w-full py-3 px-6 rounded-xl bg-teal-500 hover:bg-teal-600 active:bg-teal-700 text-white font-semibold text-base shadow-md hover:shadow-lg transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-teal-300 text-center"
+          >
             Register as a Company
-          </button>
+          </Link>
         </div>
       </div>
 
