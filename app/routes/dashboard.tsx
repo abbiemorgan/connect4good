@@ -1,5 +1,7 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { Link } from "react-router";
+import { collection, addDoc, onSnapshot, doc, updateDoc } from "firebase/firestore";
+import { db } from "../firebase";
 import type { Route } from "./+types/dashboard";
 
 // ============================================================
@@ -555,38 +557,55 @@ export default function Dashboard() {
   const [selectedMatches, setSelectedMatches] = useState<Record<string, string>>({});
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [respondingTo, setRespondingTo] = useState<RespondingTo | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const [projForm, setProjForm] = useState<ProjectFormState>(emptyProj());
   const [compForm, setCompForm] = useState<CompanyFormState>(emptyComp());
+
+  // Real-time Firestore subscriptions
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "projects"), (snap) => {
+      setProjects(
+        snap.docs.map((d) => ({ id: d.id, ...d.data() } as Project)),
+      );
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "companies"), (snap) => {
+      setCompanies(
+        snap.docs.map((d) => ({ id: d.id, ...d.data() } as Company)),
+      );
+    });
+    return unsub;
+  }, []);
 
   const projValid =
     !!(projForm.title.trim() && projForm.description.trim()
       && projForm.essentialSkills.length >= MIN_SKILLS
       && projForm.startDate && projForm.endDate && projForm.volunteeringType);
 
-  const createProject = useCallback(() => {
+  const createProject = useCallback(async () => {
     if (!projValid) return;
-    const proj: Project = {
-      id: uid("proj"),
+    await addDoc(collection(db, "projects"), {
       charityId: "charity_user",
       ...projForm,
       volunteeringType: projForm.volunteeringType as VolunteeringType,
-      projectStatus: "open",
-    };
-    setProjects((p) => [proj, ...p]);
+      projectStatus: "open" as ProjectLifecycle,
+    });
     setProjForm(emptyProj());
     setPage("dashboard");
   }, [projForm, projValid]);
 
-  const createCompany = useCallback(() => {
+  const createCompany = useCallback(async () => {
     if (!compForm.name.trim() || compForm.offeredSkills.length === 0) return;
-    const comp: Company = {
-      id: uid("comp"),
+    await addDoc(collection(db, "companies"), {
       ...compForm,
-      status: "available",
+      status: "available" as const,
       preferredProjectIds: [],
-    };
-    setCompanies((p) => [...p, comp]);
+    });
     setCompForm(emptyComp());
     setPage("dashboard");
   }, [compForm]);
@@ -604,18 +623,16 @@ export default function Dashboard() {
   }, []);
 
   const selectMatch = useCallback(
-    (projId: string, compId: string) => {
+    async (projId: string, compId: string) => {
       setSelectedMatches((p) => ({ ...p, [projId]: compId }));
       const proj = projects.find((p) => p.id === projId);
       setNotifications((p) => [
         ...p,
         { companyId: compId, projectTitle: proj?.title ?? "" },
       ]);
-      setProjects((p) =>
-        p.map((pr) =>
-          pr.id === projId ? { ...pr, projectStatus: "matched" } : pr,
-        ),
-      );
+      await updateDoc(doc(db, "projects", projId), {
+        projectStatus: "matched" as ProjectLifecycle,
+      });
     },
     [projects],
   );
@@ -630,6 +647,20 @@ export default function Dashboard() {
   }, [notifications]);
 
   const openProjects = projects.filter((p) => p.projectStatus === "open");
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-100 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-gray-500">
+          <svg className="animate-spin w-8 h-8 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          <p className="text-sm font-medium">Loading…</p>
+        </div>
+      </div>
+    );
+  }
 
   function navigate(p: Page) {
     setPage(p);
